@@ -1,0 +1,982 @@
+#!/usr/bin/env python3
+"""Friends of Duty content exporter.
+
+Generates a fodpak content package from the player's own Call of Duty 1
+(+ United Offensive) install (Docs/CONTENT_PIPELINE.md). Runs as a tkinter
+GUI by default; pass --cli for headless operation. The game launches this
+app with `--output <persistentDataPath>/Content/current`.
+"""
+
+from __future__ import annotations
+
+import argparse
+import glob
+import importlib.util
+import os
+import queue
+import shutil
+import subprocess
+import sys
+import threading
+from dataclasses import replace
+from pathlib import Path
+
+EXPORTER_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(EXPORTER_DIR))
+
+import blender_provisioner as fod_blender
+import build_importer as fod_build_importer
+import fod_paths
+import package as fod_package
+import pipeline as fod_pipeline
+import progress as fod_progress
+from cod1_archive_policy import (  # imported through pipeline's tools path
+    COD1_TIER,
+    UO_TIER,
+    OfficialArchiveError,
+    official_archives,
+    uo_installation_status,
+)
+
+MIN_PYTHON = (3, 10)
+#: Only the pinned 4.5.x line is accepted. Blender is no longer something the
+#: player installs — blender_provisioner downloads exactly one build — so this
+#: bound now exists for developer checkouts and for a --blender override.
+#: A ceiling is not optional: blender.org serves 5.2 LTS today, and 4.2 vs 4.5
+#: on identical input produce measurably different GLBs (84,628 accessors vs
+#: 53,162 in players/*/player.glb), so "new enough" was never a safe test.
+MIN_BLENDER = (4, 5, 0)
+MAX_BLENDER = (5, 0)
+APP_TITLE = "Friends of Duty — Content Exporter"
+
+
+# ---------------------------------------------------------------- requirements
+
+def python_ok() -> tuple[bool, str]:
+    version = ".".join(str(part) for part in sys.version_info[:3])
+    if sys.version_info < MIN_PYTHON:
+        return False, f"Python {version} — 3.10 or newer required"
+    return True, f"Python {version}"
+
+
+def module_ok(name: str) -> tuple[bool, str]:
+    if importlib.util.find_spec(name) is not None:
+        return True, f"{name} installed"
+    return False, f"{name} not installed"
+
+
+def blender_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    mac_app = Path("/Applications/Blender.app/Contents/MacOS/Blender")
+    if mac_app.is_file():
+        candidates.append(mac_app)
+    which = shutil.which("blender")
+    if which:
+        candidates.append(Path(which))
+    for pattern in (
+        "C:/Program Files/Blender Foundation/*/blender.exe",
+        str(Path.home() / "Applications/Blender.app/Contents/MacOS/Blender"),
+    ):
+        candidates.extend(Path(hit) for hit in glob.glob(pattern))
+    for path in (Path("/usr/bin/blender"), Path("/snap/bin/blender")):
+        if path.is_file():
+            candidates.append(path)
+    unique: list[Path] = []
+    for candidate in candidates:
+        if candidate.is_file() and candidate not in unique:
+            unique.append(candidate)
+    return unique
+
+
+def blender_version(path: Path) -> tuple[int, ...] | None:
+    try:
+        result = subprocess.run(
+            [str(path), "--version"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    for line in result.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0] == "Blender":
+            try:
+                return tuple(int(piece) for piece in parts[1].split(".")[:3])
+            except ValueError:
+                return None
+    return None
+
+
+# One implementation of the wire format, in progress.py, shared by the
+# provisioner's callback and the pipeline's step reporting.
+emit_prepare = fod_progress.emit_prepare
+
+
+def find_blender(manual: Path | None, *,
+                 log=print,
+                 cancel=None,
+                 allow_download: bool = True) -> tuple[Path | None, str]:
+    """Make the pinned Blender available, downloading it if necessary.
+
+    Named `find_` for continuity, but under the runtime-fetch design this is
+    the step that *acquires* Blender rather than hunting for one the player
+    installed. There is no PATH search and no /Applications scan: adopting
+    whatever Blender happens to be on the machine is exactly the failure the
+    pin exists to prevent.
+
+    Returns (path, message); path is None when Blender could not be made
+    available, and the message is written to be shown to a player.
+    """
+    try:
+        blender = fod_blender.resolve(
+            manual,
+            progress=emit_prepare,
+            log=log,
+            cancel=cancel,
+            allow_download=allow_download,
+        )
+    except fod_blender.ProvisionCancelled:
+        raise
+    except fod_blender.ProvisionError as error:
+        return None, str(error)
+    return blender, f"Blender {fod_blender.pinned_version_label()} — {blender}"
+
+
+def blender_status() -> tuple[bool, str]:
+    """Non-downloading status line for the requirements screen."""
+    return fod_blender.status()
+
+
+def importer_addon_status() -> tuple[bool, str]:
+    """Developer-checkout convenience; the shipped path uses
+    blender_provisioner.importer_status(), which asks Blender instead."""
+    return fod_build_importer.check(require_lod=True)
+
+
+def validate_game_dir(path: Path) -> tuple[bool, str, bool]:
+    """Pre-flight check for the chosen Call of Duty folder.
+
+    Both tiers are required: United Offensive supplies the smoke grenade and
+    two of the seven maps, so an install without it cannot produce a package
+    the game will mount. Reported here so the Start button stays disabled
+    with a reason, rather than letting the run begin and fail.
+    """
+    try:
+        main_pk3 = official_archives(path, COD1_TIER)
+    except OfficialArchiveError as error:
+        return False, str(error), False
+    ok, uo_message = uo_installation_status(path)
+    if not ok:
+        return False, uo_message.replace("\n", " "), False
+    uo_pk3 = official_archives(path, UO_TIER, required=False)
+    return (
+        True,
+        f"Main: {len(main_pk3)} official pk3, UO: {len(uo_pk3)} official pk3",
+        True,
+    )
+
+
+def pip_install_argv() -> list[str]:
+    return [sys.executable, "-m", "pip", "install", "Pillow", "numpy"]
+
+
+# ----------------------------------------------------------- atomic publishing
+
+def export_working_directory(final_directory: Path) -> Path:
+    """Hidden sibling used while a package is being generated.
+
+    The playable `current` directory is never modified until the final
+    package validator succeeds, so cancelling Blender cannot strand the game
+    with a half-upgraded schema.
+    """
+    return (
+        final_directory.parent
+        / f".{final_directory.name}.exporting"
+    )
+
+
+def seed_working_directory(
+    final_directory: Path,
+    working_directory: Path,
+    log=print,
+) -> None:
+    if working_directory.exists() or not final_directory.is_dir():
+        return
+    working_directory.parent.mkdir(parents=True, exist_ok=True)
+    log(
+        "Preparing a safe resumable export without changing the currently "
+        "playable package…"
+    )
+    copy_commands: list[list[str]] = []
+    if sys.platform == "darwin" and Path("/bin/cp").is_file():
+        # APFS clone: copy-on-write, normally near-instant even for maps.
+        copy_commands.append([
+            "/bin/cp", "-cR",
+            str(final_directory), str(working_directory),
+        ])
+    elif sys.platform.startswith("linux"):
+        cp = shutil.which("cp")
+        if cp:
+            copy_commands.append([
+                cp, "--reflink=auto", "-a",
+                str(final_directory), str(working_directory),
+            ])
+    for command in copy_commands:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and working_directory.is_dir():
+            return
+        if working_directory.exists():
+            shutil.rmtree(working_directory)
+    shutil.copytree(final_directory, working_directory)
+
+
+def promote_working_directory(
+    working_directory: Path,
+    final_directory: Path,
+) -> None:
+    if not (working_directory / "fodpak.json").is_file():
+        raise fod_pipeline.PipelineError(
+            "validated export has no fodpak.json; refusing to replace the "
+            "playable package"
+        )
+    backup = (
+        final_directory.parent
+        / f".{final_directory.name}.previous-{os.getpid()}"
+    )
+    if backup.exists():
+        raise fod_pipeline.PipelineError(
+            f"safe-publish backup already exists: {backup}"
+        )
+    moved_previous = False
+    try:
+        if final_directory.exists():
+            final_directory.rename(backup)
+            moved_previous = True
+        working_directory.rename(final_directory)
+    except Exception:
+        if (
+            moved_previous
+            and backup.exists()
+            and not final_directory.exists()
+        ):
+            backup.rename(final_directory)
+        raise
+    if backup.exists():
+        shutil.rmtree(backup)
+
+
+def run_export_pipeline(
+    cfg: fod_pipeline.PipelineConfig,
+    *,
+    log=print,
+    progress=None,
+    cancel=None,
+    only: list[str] | None = None,
+) -> bool:
+    """Run against a hidden working tree and publish after validation.
+
+    Returns True when a complete package was promoted. Developer `--only`
+    runs that omit the package step remain resumable in the working tree and
+    deliberately do not alter the mounted package.
+    """
+    # Ahead of seed_working_directory: run_pipeline enforces this too, but by
+    # then the hidden .current.exporting tree exists and a UO-less run would
+    # strand a multi-gigabyte copy the user never asked for.
+    fod_pipeline.require_united_offensive(cfg.game_dir)
+    final_directory = cfg.content_dir.resolve()
+    working_directory = export_working_directory(final_directory)
+    seed_working_directory(
+        final_directory,
+        working_directory,
+        log=log,
+    )
+    working_cfg = replace(cfg, content_dir=working_directory)
+    fod_pipeline.run_pipeline(
+        working_cfg,
+        log=log,
+        progress=progress,
+        cancel=cancel,
+        only=only,
+    )
+    should_promote = only is None or "package" in only
+    if not should_promote:
+        log(
+            f"Partial export staged at {working_directory}; the playable "
+            "package was not changed."
+        )
+        return False
+    promote_working_directory(working_directory, final_directory)
+    log(f"Published validated package atomically: {final_directory}")
+    return True
+
+
+# ------------------------------------------------------------------------ CLI
+
+def run_cli(args: argparse.Namespace) -> int:
+    core_failed = False
+    for ok, message in (python_ok(), module_ok("PIL"), module_ok("numpy")):
+        print(("OK   " if ok else "FAIL ") + message)
+        if not ok:
+            core_failed = True
+            print("     fix: " + " ".join(pip_install_argv()))
+    if core_failed:
+        return 1
+    # Blender is acquired, not required: this may download ~300-400 MB the
+    # first time. It runs before the game directory is validated so that a
+    # player on a broken connection learns that here rather than after
+    # choosing a folder — and before anything has been written to disk.
+    try:
+        blender, blender_message = find_blender(args.blender)
+    except fod_blender.ProvisionCancelled:
+        print("Cancelled.")
+        return 130
+    print(("OK   " if blender else "FAIL ") + blender_message)
+    if blender is None:
+        return 1
+    # Asked of Blender, which is the process that actually loads the
+    # extension. The exporter never imports it: under PyInstaller
+    # sys.executable is this binary, so the old `sys.executable -c` probe fed
+    # its snippet to our own argparse, and importing the GPL extension here
+    # would breach the process boundary in Docs/EXPORTER_SINGLE_EXECUTABLE.md
+    # section 9.1. A shipped payload arrives with the extension in place;
+    # there is nothing to prepare, only something to verify.
+    addon_ok, addon_message = fod_blender.importer_status(
+        blender, fod_pipeline.IMPORTER_PY_ROOT)
+    print(("OK   " if addon_ok else "FAIL ") + addon_message)
+    if not addon_ok:
+        print(
+            "     Authored XModel LOD API 1 is required; the export was not "
+            "started, because producing a silent LOD0-only package is not "
+            "supported. In a source checkout, run `make importer-fetch`."
+        )
+        return 1
+
+    if not args.game_dir:
+        print("FAIL --game-dir is required in --cli mode")
+        return 1
+    game_dir = args.game_dir.resolve()
+    valid, message, _ = validate_game_dir(game_dir)
+    print(("OK   " if valid else "FAIL ") + f"game dir: {message}")
+    if not valid:
+        return 1
+
+    content_dir = args.output.resolve()
+    cfg = fod_pipeline.PipelineConfig(
+        game_dir=game_dir,
+        content_dir=content_dir,
+        blender=blender,
+        force=args.force,
+    )
+    try:
+        promoted = run_export_pipeline(cfg, only=args.only)
+    except fod_pipeline.PipelineError as error:
+        print(f"FAIL {error}")
+        return 1
+    except fod_pipeline.PipelineCancelled:
+        return 130
+    if args.zip and promoted:
+        fod_package.write_zip(content_dir, args.zip.resolve())
+    if promoted:
+        print(f"Content package ready: {content_dir}")
+    return 0
+
+
+# ------------------------------------------------------------------------ GUI
+
+def run_gui(args: argparse.Namespace) -> int:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+
+    class ExporterApp(tk.Tk):
+        def __init__(self) -> None:
+            super().__init__()
+            self.title(APP_TITLE)
+            self.geometry("860x620")
+            self.minsize(760, 540)
+            self.launch_args = args
+            self.blender_var = tk.StringVar()
+            self.game_dir_var = tk.StringVar(
+                value=str(args.game_dir) if args.game_dir else "")
+            self.output_var = tk.StringVar(value=str(args.output))
+            self.force_var = tk.BooleanVar(value=args.force)
+            self.blender_path: Path | None = None
+
+            container = ttk.Frame(self, padding=12)
+            container.pack(fill="both", expand=True)
+            self.frames = {
+                "requirements": RequirementsFrame(container, self),
+                "paths": PathsFrame(container, self),
+                "export": ExportFrame(container, self),
+                "done": DoneFrame(container, self),
+            }
+            for frame in self.frames.values():
+                frame.grid(row=0, column=0, sticky="nsew")
+            container.rowconfigure(0, weight=1)
+            container.columnconfigure(0, weight=1)
+            self.show("requirements")
+
+        def show(self, name: str) -> None:
+            frame = self.frames[name]
+            frame.tkraise()
+            refresh = getattr(frame, "on_show", None)
+            if refresh:
+                refresh()
+
+        def build_config(self) -> fod_pipeline.PipelineConfig:
+            return fod_pipeline.PipelineConfig(
+                game_dir=Path(self.game_dir_var.get()).resolve(),
+                content_dir=Path(self.output_var.get()).resolve(),
+                blender=self.blender_path,
+                force=self.force_var.get(),
+            )
+
+    class RequirementsFrame(ttk.Frame):
+        def __init__(self, parent, app: "ExporterApp") -> None:
+            super().__init__(parent)
+            self.app = app
+            ttk.Label(self, text="Step 1 — Requirements",
+                      font=("", 16, "bold")).pack(anchor="w")
+            ttk.Label(self, text=(
+                "The exporter reads your own Call of Duty install and "
+                "generates the game's content package. No Call of Duty "
+                "content is ever downloaded — the only download is Blender "
+                "itself, fetched once from blender.org when you start the "
+                "export."),
+                wraplength=760).pack(anchor="w", pady=(2, 10))
+
+            self.rows = ttk.Frame(self)
+            self.rows.pack(fill="x")
+            self.status_labels: dict[str, ttk.Label] = {}
+            for key, title in (
+                ("python", "Python 3.10+"),
+                ("pillow", "Pillow"),
+                ("numpy", "numpy"),
+                ("blender", "Blender 4.2+"),
+                ("addon", "cod-asset-importer LOD API 1"),
+            ):
+                row = ttk.Frame(self.rows)
+                row.pack(fill="x", pady=2)
+                ttk.Label(row, text=title, width=20).pack(side="left")
+                label = ttk.Label(row, text="…", wraplength=580, justify="left")
+                label.pack(side="left", fill="x", expand=True)
+                self.status_labels[key] = label
+
+            blender_row = ttk.Frame(self)
+            blender_row.pack(fill="x", pady=(10, 2))
+            ttk.Label(blender_row, text="Blender path", width=20).pack(side="left")
+            ttk.Entry(blender_row, textvariable=app.blender_var).pack(
+                side="left", fill="x", expand=True)
+            ttk.Button(blender_row, text="Browse…",
+                       command=self.browse_blender).pack(side="left", padx=4)
+
+            buttons = ttk.Frame(self)
+            buttons.pack(fill="x", pady=12)
+            self.pip_button = ttk.Button(
+                buttons, text="Install Python packages (pip)",
+                command=self.install_packages)
+            self.pip_button.pack(side="left")
+            self.build_button = ttk.Button(
+                buttons, text="Prepare importer",
+                command=self.build_importer)
+            self.build_button.pack(side="left", padx=6)
+            ttk.Button(buttons, text="Re-check",
+                       command=self.refresh).pack(side="left")
+            self.next_button = ttk.Button(
+                buttons, text="Continue →", command=lambda: app.show("paths"))
+            self.next_button.pack(side="right")
+            self.pip_status = ttk.Label(self, text="", wraplength=760)
+            self.pip_status.pack(anchor="w")
+
+            self.build_running = False
+            log_frame = ttk.Frame(self)
+            log_frame.pack(fill="both", expand=True, pady=(6, 0))
+            self.build_log = tk.Text(log_frame, height=8, state="disabled",
+                                     wrap="none", font=("Menlo", 10))
+            scroll = ttk.Scrollbar(log_frame, command=self.build_log.yview)
+            self.build_log.configure(yscrollcommand=scroll.set)
+            self.build_log.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+
+        def on_show(self) -> None:
+            self.refresh()
+
+        def set_status(self, key: str, ok: bool, message: str,
+                       warn_only: bool = False) -> None:
+            color = "#2e7d32" if ok else ("#b26a00" if warn_only else "#c62828")
+            prefix = "OK — " if ok else ("Warning — " if warn_only else "Missing — ")
+            self.status_labels[key].configure(text=prefix + message, foreground=color)
+
+        def refresh(self) -> None:
+            ok_python, message = python_ok()
+            self.set_status("python", ok_python, message)
+            ok_pillow, message = module_ok("PIL")
+            self.set_status("pillow", ok_pillow, message)
+            ok_numpy, message = module_ok("numpy")
+            self.set_status("numpy", ok_numpy, message)
+            # Status only — never a download. This runs on every refresh and
+            # on every Browse, and a UI refresh must not start pulling 300 MB.
+            # The acquisition happens once, inside the export worker, where it
+            # has a progress bar and a Cancel button.
+            blender_ok, message = blender_status()
+            self.set_status("blender", blender_ok, message, warn_only=False)
+            addon_ok, message = importer_addon_status()
+            self.set_status("addon", addon_ok, message)
+            self.pip_button.configure(
+                state="normal" if not (ok_pillow and ok_numpy) else "disabled")
+            self.build_button.configure(
+                state="normal" if not addon_ok and not self.build_running
+                else "disabled")
+            # blender_ok means "a pinned build exists for this platform",
+            # not "it is already on disk" — the only case that blocks the
+            # export is a platform with no Blender build at all (Linux ARM).
+            core_ok = (
+                ok_python and
+                ok_pillow and
+                ok_numpy and
+                blender_ok and
+                addon_ok
+            )
+            self.next_button.configure(state="normal" if core_ok else "disabled")
+
+        def browse_blender(self) -> None:
+            selected = filedialog.askopenfilename(title="Select the Blender executable")
+            if selected:
+                self.app.blender_var.set(selected)
+                self.refresh()
+
+        def install_packages(self) -> None:
+            self.pip_button.configure(state="disabled")
+            self.pip_status.configure(text="Installing Pillow + numpy…")
+
+            def worker() -> None:
+                result = subprocess.run(
+                    pip_install_argv(), capture_output=True, text=True)
+                tail = (result.stdout + result.stderr).strip().splitlines()
+                summary = tail[-1] if tail else ""
+                self.after(0, lambda: self.finish_install(result.returncode, summary))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def finish_install(self, returncode: int, summary: str) -> None:
+            self.pip_status.configure(
+                text=("pip finished: " if returncode == 0 else "pip FAILED: ") + summary)
+            self.refresh()
+
+        def append_build_log(self, line: str) -> None:
+            self.build_log.configure(state="normal")
+            self.build_log.insert("end", line + "\n")
+            self.build_log.see("end")
+            self.build_log.configure(state="disabled")
+
+        def build_importer(self) -> None:
+            self.build_running = True
+            self.build_button.configure(state="disabled")
+            self.append_build_log(
+                "Preparing authored XModel LOD API 1. A capable bundled "
+                "platform binary is used when available; the bundled v3.5 "
+                "LOD0-only binaries are skipped and the vendored Rust source "
+                "is built once. Local compilation needs https://rustup.rs.")
+
+            def emit(line: str) -> None:
+                self.after(0, lambda text=line: self.append_build_log(text))
+
+            def worker() -> None:
+                try:
+                    fod_build_importer.build(
+                        log=emit,
+                        require_lod=True,
+                    )
+                except Exception as error:  # surfaced in the log pane
+                    self.after(0, lambda: self.finish_build(str(error)))
+                else:
+                    self.after(0, lambda: self.finish_build(None))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def finish_build(self, error: str | None) -> None:
+            self.build_running = False
+            if error:
+                self.append_build_log("Build FAILED: " + error)
+            else:
+                self.append_build_log("Build finished.")
+            self.refresh()
+
+    class PathsFrame(ttk.Frame):
+        def __init__(self, parent, app: "ExporterApp") -> None:
+            super().__init__(parent)
+            self.app = app
+            ttk.Label(self, text="Step 2 — Locations",
+                      font=("", 16, "bold")).pack(anchor="w")
+            ttk.Label(self, text=(
+                "Select your Call of Duty installation (the folder containing "
+                "Main/ and, if installed, uo/) and where the content package "
+                "should be written."), wraplength=760).pack(anchor="w", pady=(2, 10))
+
+            game_row = ttk.Frame(self)
+            game_row.pack(fill="x", pady=2)
+            ttk.Label(game_row, text="Call of Duty folder", width=20).pack(side="left")
+            ttk.Entry(game_row, textvariable=app.game_dir_var).pack(
+                side="left", fill="x", expand=True)
+            ttk.Button(game_row, text="Browse…",
+                       command=self.browse_game).pack(side="left", padx=4)
+            self.game_status = ttk.Label(self, text="", wraplength=760)
+            self.game_status.pack(anchor="w", padx=(0, 0), pady=(0, 8))
+
+            out_row = ttk.Frame(self)
+            out_row.pack(fill="x", pady=2)
+            ttk.Label(out_row, text="Output folder", width=20).pack(side="left")
+            ttk.Entry(out_row, textvariable=app.output_var).pack(
+                side="left", fill="x", expand=True)
+            ttk.Button(out_row, text="Browse…",
+                       command=self.browse_output).pack(side="left", padx=4)
+
+            options = ttk.Frame(self)
+            options.pack(fill="x", pady=10)
+            ttk.Checkbutton(options, text="Force full re-export (ignore existing outputs)",
+                            variable=app.force_var).pack(anchor="w")
+
+            buttons = ttk.Frame(self)
+            buttons.pack(fill="x", pady=12)
+            ttk.Button(buttons, text="← Back",
+                       command=lambda: app.show("requirements")).pack(side="left")
+            self.start_button = ttk.Button(
+                buttons, text="Start Export →", command=self.start)
+            self.start_button.pack(side="right")
+            app.game_dir_var.trace_add("write", lambda *_: self.refresh())
+
+        def on_show(self) -> None:
+            self.refresh()
+
+        def refresh(self) -> None:
+            raw = self.app.game_dir_var.get().strip()
+            if not raw:
+                self.game_status.configure(text="Select the install folder.",
+                                           foreground="#b26a00")
+                self.start_button.configure(state="disabled")
+                return
+            valid, message, has_uo = validate_game_dir(Path(raw))
+            self.app.has_uo = has_uo
+            self.game_status.configure(
+                text=message, foreground="#2e7d32" if valid else "#c62828")
+            self.start_button.configure(state="normal" if valid else "disabled")
+
+        def browse_game(self) -> None:
+            selected = filedialog.askdirectory(title="Call of Duty installation folder")
+            if selected:
+                self.app.game_dir_var.set(selected)
+
+        def browse_output(self) -> None:
+            selected = filedialog.askdirectory(title="Content output folder")
+            if selected:
+                self.app.output_var.set(selected)
+
+        def start(self) -> None:
+            addon_ok, message = importer_addon_status()
+            if not addon_ok:
+                messagebox.showerror(
+                    APP_TITLE,
+                    "Authored XModel LOD support is required before export.\n\n"
+                    + message,
+                )
+                self.app.show("requirements")
+                return
+            self.app.show("export")
+            self.app.frames["export"].start(self.app.build_config())
+
+    class ExportFrame(ttk.Frame):
+        def __init__(self, parent, app: "ExporterApp") -> None:
+            super().__init__(parent)
+            self.app = app
+            self.queue: queue.Queue = queue.Queue()
+            self.cancel_event = threading.Event()
+            self.worker: threading.Thread | None = None
+
+            ttk.Label(self, text="Step 3 — Exporting",
+                      font=("", 16, "bold")).pack(anchor="w")
+            self.tree = ttk.Treeview(
+                self, columns=("status",), show="tree headings", height=13)
+            self.tree.heading("#0", text="Step")
+            self.tree.heading("status", text="Status")
+            self.tree.column("#0", width=420)
+            self.tree.column("status", width=140)
+            self.tree.pack(fill="x", pady=(6, 6))
+
+            self.progress = ttk.Progressbar(self, mode="determinate")
+            self.progress.pack(fill="x", pady=(0, 6))
+
+            log_frame = ttk.Frame(self)
+            log_frame.pack(fill="both", expand=True)
+            self.log_text = tk.Text(log_frame, height=10, state="disabled",
+                                    wrap="none", font=("Menlo", 10))
+            scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
+            self.log_text.configure(yscrollcommand=scroll.set)
+            self.log_text.pack(side="left", fill="both", expand=True)
+            scroll.pack(side="right", fill="y")
+
+            buttons = ttk.Frame(self)
+            buttons.pack(fill="x", pady=8)
+            self.cancel_button = ttk.Button(buttons, text="Cancel",
+                                            command=self.cancel)
+            self.cancel_button.pack(side="left")
+            self.back_button = ttk.Button(
+                buttons, text="← Back", state="disabled",
+                command=lambda: app.show("paths"))
+            self.back_button.pack(side="right")
+
+        def start(self, cfg: fod_pipeline.PipelineConfig) -> None:
+            self.cancel_event.clear()
+            self.cancel_button.configure(state="normal")
+            self.back_button.configure(state="disabled")
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.configure(state="disabled")
+            self.tree.delete(*self.tree.get_children())
+            steps = fod_pipeline.build_steps(cfg)
+            for step in steps:
+                self.tree.insert("", "end", iid=step.key, text=step.title,
+                                 values=("pending",))
+            self.progress.configure(maximum=len(steps), value=0)
+
+            def worker() -> None:
+                emit = lambda line: self.queue.put(("log", line))
+                try:
+                    # Acquire Blender first, on this thread, so the download
+                    # gets the log pane and the Cancel button rather than
+                    # freezing the UI from a refresh handler.
+                    manual = (self.app.blender_var.get().strip() or None)
+                    blender, message = find_blender(
+                        Path(manual) if manual
+                        else self.app.launch_args.blender,
+                        log=emit,
+                        cancel=self.cancel_event,
+                    )
+                    if blender is None:
+                        self.queue.put(("log", message))
+                        self.queue.put(("finished", message))
+                        return
+                    self.app.blender_path = blender
+                    run_export_pipeline(
+                        replace(cfg, blender=blender),
+                        log=emit,
+                        progress=lambda i, n, key, status: self.queue.put(
+                            ("progress", i, n, key, status)),
+                        cancel=self.cancel_event)
+                except (fod_pipeline.PipelineCancelled,
+                        fod_blender.ProvisionCancelled):
+                    self.queue.put(("finished", "cancelled"))
+                except Exception as error:  # surfaced in the log pane
+                    self.queue.put(("log", f"ERROR {error}"))
+                    self.queue.put(("finished", str(error)))
+                else:
+                    self.queue.put(("finished", None))
+
+            self.worker = threading.Thread(target=worker, daemon=True)
+            self.worker.start()
+            self.after(100, self.poll)
+
+        def poll(self) -> None:
+            finished: tuple | None = None
+            try:
+                while True:
+                    message = self.queue.get_nowait()
+                    if message[0] == "log":
+                        self.append_log(message[1])
+                    elif message[0] == "progress":
+                        _, index, total, key, status = message
+                        if self.tree.exists(key):
+                            self.tree.set(key, "status", status)
+                        completed = index + (1 if status in ("done", "skipped") else 0)
+                        self.progress.configure(value=completed)
+                    elif message[0] == "finished":
+                        finished = message
+            except queue.Empty:
+                pass
+            if finished is not None:
+                self.finish(finished[1])
+            else:
+                self.after(100, self.poll)
+
+        def append_log(self, line: str) -> None:
+            self.log_text.configure(state="normal")
+            self.log_text.insert("end", line + "\n")
+            self.log_text.see("end")
+            self.log_text.configure(state="disabled")
+
+        def cancel(self) -> None:
+            self.cancel_event.set()
+            self.append_log("Cancelling… current step will be terminated.")
+            self.cancel_button.configure(state="disabled")
+
+        def finish(self, error: str | None) -> None:
+            self.cancel_button.configure(state="disabled")
+            self.back_button.configure(state="normal")
+            if error is None:
+                self.progress.configure(value=self.progress["maximum"])
+                self.app.show("done")
+            elif error == "cancelled":
+                self.append_log("Export cancelled. Progress is kept; "
+                                "run again to resume.")
+            else:
+                self.append_log("Export failed. Fix the issue above and go "
+                                "back to retry — finished steps are skipped.")
+
+    class DoneFrame(ttk.Frame):
+        def __init__(self, parent, app: "ExporterApp") -> None:
+            super().__init__(parent)
+            self.app = app
+            ttk.Label(self, text="Done — content package ready",
+                      font=("", 16, "bold")).pack(anchor="w")
+            self.summary = ttk.Label(self, text="", wraplength=760, justify="left")
+            self.summary.pack(anchor="w", pady=(4, 12))
+
+            buttons = ttk.Frame(self)
+            buttons.pack(fill="x")
+            ttk.Button(buttons, text="Save transportable .fodpak (zip)…",
+                       command=self.save_zip).pack(side="left")
+            self.launch_button = ttk.Button(
+                buttons, text="Launch game", command=self.launch_game)
+            self.launch_button.pack(side="left", padx=8)
+            ttk.Button(buttons, text="Close",
+                       command=self.app.destroy).pack(side="right")
+            self.zip_status = ttk.Label(self, text="", wraplength=760)
+            self.zip_status.pack(anchor="w", pady=8)
+
+        def on_show(self) -> None:
+            content = Path(self.app.output_var.get())
+            self.summary.configure(text=(
+                f"The package was written to:\n{content}\n\n"
+                "The game will mount it automatically on next start. Packages "
+                "generated from your install are for personal use only."))
+            game_exe = self.app.launch_args.game_exe
+            self.launch_button.configure(
+                state="normal" if game_exe and Path(game_exe).exists() else "disabled")
+
+        def save_zip(self) -> None:
+            destination = filedialog.asksaveasfilename(
+                title="Save content package",
+                defaultextension=".fodpak",
+                initialfile="friends_of_duty_content.fodpak",
+                filetypes=[("Friends of Duty package", "*.fodpak")])
+            if not destination:
+                return
+            self.zip_status.configure(text="Writing zip…")
+
+            def worker() -> None:
+                try:
+                    fod_package.write_zip(
+                        Path(self.app.output_var.get()).resolve(), Path(destination))
+                except Exception as error:
+                    self.after(0, lambda: self.zip_status.configure(
+                        text=f"Zip failed: {error}"))
+                else:
+                    self.after(0, lambda: self.zip_status.configure(
+                        text=f"Saved {destination}"))
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def launch_game(self) -> None:
+            game_exe = self.app.launch_args.game_exe
+            try:
+                if sys.platform == "darwin" and str(game_exe).endswith(".app"):
+                    subprocess.Popen(["open", str(game_exe)])
+                else:
+                    subprocess.Popen([str(game_exe)])
+            except OSError as error:
+                messagebox.showerror(APP_TITLE, f"Could not launch the game: {error}")
+
+    ExporterApp().mainloop()
+    return 0
+
+
+# ----------------------------------------------------------------------- main
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--cli", action="store_true", help="run headless")
+    parser.add_argument("--game-dir", type=Path,
+                        help="Call of Duty install (contains Main/ and optionally uo/)")
+    parser.add_argument("--output", type=Path,
+                        default=fod_pipeline.DEFAULT_CONTENT_DIR,
+                        help="content package directory (the game passes its "
+                             "persistentDataPath/Content/current)")
+    parser.add_argument("--blender", type=Path, help="Blender executable override")
+    parser.add_argument("--force", action="store_true",
+                        help="re-run every step even when outputs exist")
+    # Retired selection flags. United Offensive is mandatory and the roster is
+    # fixed at seven maps, so none of these can change what is exported.
+    #
+    # --include-uo and --all-mp are ACCEPTED AND IGNORED rather than removed:
+    # an already-installed game spawns this exporter and still passes
+    # --include-uo (ExporterLauncher.cs), so erroring on it would break
+    # updating from any older build. --maps is human-typed only, and silently
+    # ignoring a requested subset would hand back a package the user did not
+    # ask for, so that one fails loudly.
+    parser.add_argument(
+        "--include-uo",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--all-mp", action="store_true", dest="all_mp",
+                        help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--maps",
+        nargs="*",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--only", nargs="*", help="run only these pipeline step keys")
+    parser.add_argument("--zip", type=Path,
+                        help="(cli) also write a transportable .fodpak zip")
+    parser.add_argument("--game-exe", type=Path,
+                        help="game executable for the 'Launch game' button")
+    parser.add_argument("--game-callback", action="store_true",
+                        help="passed by the game when it spawned the exporter")
+    args = parser.parse_args()
+    if args.maps:
+        parser.error(
+            "the Friends of Duty roster is fixed at seven maps "
+            "(Carentan, Pavlov, Chateau, Railyard, Rocket, Arnhem, Cassino); "
+            "--maps is no longer supported"
+        )
+    return args
+
+
+def stream_stdout_live() -> None:
+    """Line-buffer stdout/stderr.
+
+    The game launches the exporter with its pipes redirected, and Python
+    block-buffers a pipe: the boot-screen console would sit empty through a
+    whole step and then jump 8 KB at once, which is indistinguishable from a
+    hang. Line buffering costs nothing here and makes every step visible as
+    it happens. Older streams without .reconfigure() just keep their default.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(line_buffering=True)
+        except (AttributeError, ValueError):
+            pass
+
+
+def main() -> int:
+    stream_stdout_live()
+    args = parse_args()
+    if args.game_callback:
+        # --game-callback has been accepted and ignored since the launcher
+        # first passed it. It now means exactly one thing: a program, not a
+        # person, is reading this stdout, so the machine-readable `@fod`
+        # lines are switched on. Setting it in the environment rather than
+        # threading a flag means every child step inherits it through
+        # fod_paths.child_env() without touching 19 call sites.
+        os.environ[fod_paths.PROGRESS_ENV] = "1"
+    if args.cli:
+        return run_cli(args)
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        print("tkinter is not available; falling back to --cli mode")
+        return run_cli(args)
+    return run_gui(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

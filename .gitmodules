@@ -1,0 +1,3 @@
+[submodule "tools/cod-asset-importer"]
+	path = tools/cod-asset-importer
+	url = https://github.com/anarqz/cod-asset-importer.git

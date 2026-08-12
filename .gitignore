@@ -1,0 +1,45 @@
+# ---------------------------------------------------------------- hard rule
+#
+# NO Call of Duty data, ever. This repository ships extraction CODE; the
+# player supplies the game. Anything below is a shape that game data arrives
+# in — if one of these ever shows up in `git status`, something is wrong.
+*.pk3
+*.iwd
+*.iwi
+*.d3dbsp
+*.xmodel
+*.xmodel_export
+*.xanim
+*.xanim_export
+*.gsc
+*.ff
+*.bik
+*.roq
+*.fodpak
+
+# Export output. The generator writes a package; it never belongs in here.
+/out/
+/output/
+/dist/
+
+# CI-built cod_asset_importer extensions, fetched with `make importer-fetch`.
+# Build outputs of github.com/anarqz/cod-asset-importer, reproducible from
+# that repo's workflow, ~11 MB of binaries per refresh.
+/packaging/importers/
+
+# Blender is downloaded to a per-user cache at runtime, never into the tree.
+/blender/
+
+# ------------------------------------------------------------------- python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+build/
+
+# --------------------------------------------------------------------- misc
+.DS_Store
+Thumbs.db
+*.log
