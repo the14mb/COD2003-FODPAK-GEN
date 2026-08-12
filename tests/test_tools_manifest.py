@@ -70,10 +70,15 @@ class ManifestTests(unittest.TestCase):
                 self.assertIn(name, tools_closure.closure())
 
     def test_dev_only_tools_never_ship(self):
+        # generate_ui_assets was a fifth name here until the generator was
+        # split out of the game repository. It produces the GAME's menu chrome
+        # into Assets/Resources/UI and explicitly defers pak art to this tool,
+        # so it stayed behind — and a module that is not in tools/ cannot be in
+        # the exclusion set. The four below still cover every naming shape the
+        # allow-list has to reject.
         excluded = set(tools_closure.unreachable())
         for name in ("audit_viewmodel_pair", "report_skeleton_hierarchy",
-                     "diagnose_cod1_viewmodel", "render_viewmodel_pose",
-                     "generate_ui_assets"):
+                     "diagnose_cod1_viewmodel", "render_viewmodel_pose"):
             with self.subTest(module=name):
                 self.assertIn(name, excluded)
 
