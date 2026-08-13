@@ -1,8 +1,14 @@
 # COD2003 fodpak generator
 
 Turns **your own** copy of Call of Duty (2003) and United Offensive into a
-`.fodpak` content package for [Friends of Duty](https://github.com/the14mb),
+`.fodpak` content package for
+**[Friends of Duty](https://store.steampowered.com/app/4480880/Friends_of_Duty/)**,
 a mods-only FPS sandbox that ships no content of its own.
+
+> ### ▶ [Friends of Duty on Steam](https://store.steampowered.com/app/4480880/Friends_of_Duty/)
+>
+> This tool exists to feed that game. Install it first — the package you build
+> here goes into its `mods/` folder.
 
 > ### You must own the game
 >

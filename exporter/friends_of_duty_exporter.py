@@ -18,6 +18,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import webbrowser
 from dataclasses import replace
 from pathlib import Path
 
@@ -48,6 +49,27 @@ MIN_PYTHON = (3, 10)
 MIN_BLENDER = (4, 5, 0)
 MAX_BLENDER = (5, 0)
 APP_TITLE = "Friends of Duty — Content Exporter"
+STEAM_URL = "https://store.steampowered.com/app/4480880/Friends_of_Duty/"
+
+# The exporter's palette, taken off the store art: near-black ground, steel
+# from the star, and status colours picked to stay legible on a dark panel
+# rather than the ttk defaults, which are chosen for a white one.
+INK = "#0b0d0f"          # the band, and what header.png fades into
+PANEL = "#14171a"
+FIELD = "#1c2126"
+LINE = "#2b3238"
+TEXT = "#d7dce0"
+MUTED = "#8b949e"
+DISABLED = "#5a626a"
+STEEL = "#6d7982"
+BUTTON = "#232a30"
+BUTTON_HOVER = "#2e373f"
+LINK = "#9fb4c4"
+LINK_HOVER = "#d7e4ee"
+STATUS_OK = "#7bd88f"
+STATUS_WARN = "#ffc46b"
+STATUS_FAIL = "#ff8080"
+BAND_HEIGHT = 120
 
 
 # ---------------------------------------------------------------- requirements
@@ -388,12 +410,115 @@ def run_gui(args: argparse.Namespace) -> int:
     import tkinter as tk
     from tkinter import filedialog, messagebox, ttk
 
+    def asset(name: str) -> Path:
+        """Brand art, rendered by packaging/make_brand_assets.py."""
+        return fod_paths.payload_root() / "assets" / name
+
+    def install_theme(root: tk.Tk) -> None:
+        """Dress the default grey ttk widgets in the game's palette.
+
+        'clam' first, because the native Windows theme ignores most colour
+        options -- its widgets are drawn by the OS -- so the usual result of
+        theming without it is half a window turning dark.
+        """
+        style = ttk.Style(root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:  # a stripped Tk; keep the default rather than fail
+            return
+        root.configure(bg=INK)
+        style.configure(".", background=PANEL, foreground=TEXT,
+                        fieldbackground=FIELD, bordercolor=LINE,
+                        lightcolor=PANEL, darkcolor=PANEL,
+                        focuscolor=STEEL, insertcolor=TEXT)
+        style.configure("TFrame", background=PANEL)
+        style.configure("Band.TFrame", background=INK)
+        style.configure("TLabel", background=PANEL, foreground=TEXT)
+        style.configure("Muted.TLabel", background=PANEL, foreground=MUTED)
+        style.configure("Heading.TLabel", background=PANEL, foreground=TEXT,
+                        font=("Segoe UI Semibold", 15))
+        style.configure("Band.TLabel", background=INK, foreground=MUTED)
+        style.configure("TButton", background=BUTTON, foreground=TEXT,
+                        bordercolor=LINE, focusthickness=0, padding=(12, 6))
+        style.map("TButton",
+                  background=[("active", BUTTON_HOVER),
+                              ("disabled", PANEL)],
+                  foreground=[("disabled", DISABLED)])
+        style.configure("Primary.TButton", background=STEEL, foreground="#0b0d0f")
+        style.map("Primary.TButton",
+                  background=[("active", "#7d8a94"), ("disabled", PANEL)],
+                  foreground=[("disabled", DISABLED)])
+        style.configure("TEntry", fieldbackground=FIELD, foreground=TEXT,
+                        bordercolor=LINE, insertcolor=TEXT, padding=4)
+        style.configure("TCheckbutton", background=PANEL, foreground=TEXT)
+        style.map("TCheckbutton", background=[("active", PANEL)])
+        style.configure("TProgressbar", background=STEEL, troughcolor=FIELD,
+                        bordercolor=LINE, lightcolor=STEEL, darkcolor=STEEL)
+
+    def install_icon(root: tk.Tk) -> None:
+        """Taskbar and title-bar icon. Never fatal: it is decoration."""
+        icon = asset("fod.ico")
+        if icon.is_file():
+            try:
+                root.iconbitmap(default=str(icon))
+                return
+            except tk.TclError:
+                pass
+        photo = asset("fod_icon.png")
+        if photo.is_file():
+            try:
+                root._icon_image = tk.PhotoImage(file=str(photo))
+                root.iconphoto(True, root._icon_image)
+            except tk.TclError:
+                pass
+
+    def build_band(root: tk.Tk) -> tk.Frame:
+        """The title band: wordmark over the ruins, fading into flat INK.
+
+        The image is left-anchored and the frame paints the same INK the image
+        fades to, so widening the window extends the band with no visible seam
+        instead of stretching or tiling the art.
+        """
+        band = tk.Frame(root, bg=INK, height=BAND_HEIGHT)
+        band.pack(fill="x", side="top")
+        band.pack_propagate(False)
+        header = asset("header.png")
+        if header.is_file():
+            try:
+                root._band_image = tk.PhotoImage(file=str(header))
+            except tk.TclError:
+                root._band_image = None
+            if root._band_image is not None:
+                tk.Label(band, image=root._band_image, bg=INK,
+                         bd=0).place(x=0, y=0)
+        return band
+
+    def build_footer(root: tk.Tk) -> tk.Frame:
+        foot = tk.Frame(root, bg=INK, height=30)
+        foot.pack(fill="x", side="bottom")
+        foot.pack_propagate(False)
+        tk.Label(foot, text="Your own Call of Duty install stays on your machine.",
+                 bg=INK, fg=MUTED).pack(side="left", padx=14)
+        link = tk.Label(foot, text="Friends of Duty on Steam  ↗", bg=INK,
+                        fg=LINK, cursor="hand2")
+        link.pack(side="right", padx=14)
+        link.bind("<Button-1>", lambda _event: webbrowser.open(STEAM_URL))
+        link.bind("<Enter>", lambda _e: link.configure(fg=LINK_HOVER))
+        link.bind("<Leave>", lambda _e: link.configure(fg=LINK))
+        return foot
+
     class ExporterApp(tk.Tk):
         def __init__(self) -> None:
             super().__init__()
             self.title(APP_TITLE)
-            self.geometry("860x620")
-            self.minsize(760, 540)
+            # Taller than before: the band takes 120px off the top and the
+            # requirements list must still fit without the log pane collapsing.
+            self.geometry("960x720")
+            self.minsize(880, 660)
+            install_theme(self)
+            install_icon(self)
+            build_band(self)
+            build_footer(self)
             self.launch_args = args
             self.game_dir_var = tk.StringVar(
                 value=str(args.game_dir) if args.game_dir else "")
@@ -496,8 +621,15 @@ def run_gui(args: argparse.Namespace) -> int:
             self.build_running = False
             log_frame = ttk.Frame(self)
             log_frame.pack(fill="both", expand=True, pady=(6, 0))
+            # Consolas rather than Menlo: Menlo does not exist on Windows, and
+            # Tk silently substitutes a proportional face, which turns a log of
+            # aligned paths into ragged prose.
             self.build_log = tk.Text(log_frame, height=8, state="disabled",
-                                     wrap="none", font=("Menlo", 10))
+                                     wrap="none", font=("Consolas", 10),
+                                     bg=FIELD, fg=TEXT, insertbackground=TEXT,
+                                     relief="flat", highlightthickness=1,
+                                     highlightbackground=LINE,
+                                     selectbackground=STEEL)
             scroll = ttk.Scrollbar(log_frame, command=self.build_log.yview)
             self.build_log.configure(yscrollcommand=scroll.set)
             self.build_log.pack(side="left", fill="both", expand=True)
@@ -508,7 +640,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def set_status(self, key: str, ok: bool, message: str,
                        warn_only: bool = False) -> None:
-            color = "#2e7d32" if ok else ("#b26a00" if warn_only else "#c62828")
+            color = STATUS_OK if ok else (STATUS_WARN if warn_only else STATUS_FAIL)
             prefix = "OK — " if ok else ("Warning — " if warn_only else "Missing — ")
             self.status_labels[key].configure(text=prefix + message, foreground=color)
 
@@ -651,13 +783,13 @@ def run_gui(args: argparse.Namespace) -> int:
             raw = self.app.game_dir_var.get().strip()
             if not raw:
                 self.game_status.configure(text="Select the install folder.",
-                                           foreground="#b26a00")
+                                           foreground=STATUS_WARN)
                 self.start_button.configure(state="disabled")
                 return
             valid, message, has_uo = validate_game_dir(Path(raw))
             self.app.has_uo = has_uo
             self.game_status.configure(
-                text=message, foreground="#2e7d32" if valid else "#c62828")
+                text=message, foreground=STATUS_OK if valid else STATUS_FAIL)
             self.start_button.configure(state="normal" if valid else "disabled")
 
         def browse_game(self) -> None:
@@ -707,7 +839,11 @@ def run_gui(args: argparse.Namespace) -> int:
             log_frame = ttk.Frame(self)
             log_frame.pack(fill="both", expand=True)
             self.log_text = tk.Text(log_frame, height=10, state="disabled",
-                                    wrap="none", font=("Menlo", 10))
+                                    wrap="none", font=("Consolas", 10),
+                                    bg=FIELD, fg=TEXT, insertbackground=TEXT,
+                                    relief="flat", highlightthickness=1,
+                                    highlightbackground=LINE,
+                                    selectbackground=STEEL)
             scroll = ttk.Scrollbar(log_frame, command=self.log_text.yview)
             self.log_text.configure(yscrollcommand=scroll.set)
             self.log_text.pack(side="left", fill="both", expand=True)

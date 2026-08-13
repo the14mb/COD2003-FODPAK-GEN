@@ -73,7 +73,9 @@ exe = EXE(
     upx=False,          # UPX is a reliable way to look like malware to AV.
     console=True,       # The game drives this headless and reads stdout.
     disable_windowed_traceback=False,
-    icon=None,
+    # Rendered by packaging/make_brand_assets.py; carries every size Windows
+    # asks for, so the taskbar and alt-tab do not downscale the 256 badly.
+    icon=str(REPO / "exporter" / "assets" / "fod.ico"),
 )
 
 coll = COLLECT(

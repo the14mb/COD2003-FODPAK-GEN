@@ -148,6 +148,17 @@ def assemble(frozen: Path, output: Path, target: str) -> None:
     for name in SHIPPED_EXPORTER_MODULES:
         shutil.copy2(EXPORTER / name, output / name)
 
+    # Brand art, loose beside the binary like everything else the GUI reads at
+    # runtime, because fod_paths.payload_root() resolves the same way in a
+    # checkout and in a bundle. Missing art degrades to a plain window rather
+    # than failing, but a shipped payload should never be missing it.
+    assets_src = EXPORTER / "assets"
+    if not assets_src.is_dir():
+        raise SystemExit(
+            f"brand assets missing: {assets_src}\n"
+            "run: python3 packaging/make_brand_assets.py --artwork <dir>")
+    shutil.copytree(assets_src, output / "assets")
+
     tools_out = output / "tools"
     tools_out.mkdir()
     for name in tools_closure.read_manifest():
