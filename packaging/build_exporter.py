@@ -43,7 +43,7 @@ import tools_closure  # noqa: E402
 SHIPPED_EXPORTER_MODULES = (
     "friends_of_duty_exporter.py", "pipeline.py", "package.py",
     "fod_launcher.py", "fod_paths.py", "progress.py", "toolchain.py",
-    "blender_provisioner.py", "cod_autodetect.py",
+    "blender_provisioner.py", "cod_autodetect.py", "fod_install.py",
 )
 
 #: Imports PyInstaller cannot discover on its own. Everything the payload

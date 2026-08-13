@@ -27,6 +27,7 @@ sys.path.insert(0, str(EXPORTER_DIR))
 
 import blender_provisioner as fod_blender
 import build_importer as fod_build_importer
+import fod_install
 import fod_paths
 import package as fod_package
 import pipeline as fod_pipeline
@@ -408,9 +409,20 @@ def run_cli(args: argparse.Namespace) -> int:
         return 1
     except fod_pipeline.PipelineCancelled:
         return 130
-    if args.zip and promoted:
-        fod_package.write_zip(content_dir, args.zip.resolve())
     if promoted:
+        # An explicit --zip wins. Otherwise install into the game's mods
+        # folder when the game is on this machine, so a headless run started
+        # from the launcher finishes as playable as a GUI run does; a player
+        # who never sees this window should not end up with a package they
+        # then have to move by hand.
+        destination = args.zip.resolve() if args.zip else None
+        if destination is None and not args.no_install:
+            install = fod_install.detect()
+            if install is not None:
+                destination = fod_install.package_path(install)
+        if destination is not None:
+            fod_package.write_zip(content_dir, destination)
+            print(f"Installed package: {destination}")
         print(f"Content package ready: {content_dir}")
     return 0
 
@@ -623,7 +635,19 @@ def run_gui(args: argparse.Namespace) -> int:
                 value=str(args.game_dir) if args.game_dir else "")
             self.output_var = tk.StringVar(value=str(args.output))
             self.force_var = tk.BooleanVar(value=args.force)
+            # Where the finished pak is installed. Detected rather than asked
+            # for: the exporter ships beside the game, so the answer is almost
+            # always known and making the player supply it is pure friction.
+            self.fod_install: Path | None = fod_install.detect()
+            self.package_var = tk.StringVar(
+                value=str(args.zip) if args.zip
+                else (str(fod_install.package_path(self.fod_install))
+                      if self.fod_install else ""))
             self.blender_path: Path | None = None
+            #: Set by ExportFrame.install_package once the run succeeds, and
+            #: read by the done screen to say where the pak actually landed.
+            self.installed_package: Path | None = None
+            self.install_error: str | None = None
 
             container = ttk.Frame(self, padding=12)
             container.pack(fill="both", expand=True)
@@ -860,13 +884,29 @@ def run_gui(args: argparse.Namespace) -> int:
             self.game_status = ttk.Label(self, text="", wraplength=760)
             self.game_status.pack(anchor="w", padx=(0, 0), pady=(0, 8))
 
+            install_row = ttk.Frame(self)
+            install_row.pack(fill="x", pady=2)
+            ttk.Label(install_row, text="Install package to",
+                      width=26).pack(side="left")
+            ttk.Entry(install_row, textvariable=app.package_var).pack(
+                side="left", fill="x", expand=True)
+            ttk.Button(install_row, text="Browse…",
+                       command=self.browse_package).pack(side="left", padx=4)
+            self.install_status = ttk.Label(self, text="", wraplength=900)
+            self.install_status.pack(anchor="w", pady=(0, 8))
+
             out_row = ttk.Frame(self)
             out_row.pack(fill="x", pady=2)
-            ttk.Label(out_row, text="Output folder", width=26).pack(side="left")
+            ttk.Label(out_row, text="Working folder", width=26).pack(side="left")
             ttk.Entry(out_row, textvariable=app.output_var).pack(
                 side="left", fill="x", expand=True)
             ttk.Button(out_row, text="Browse…",
                        command=self.browse_output).pack(side="left", padx=4)
+            ttk.Label(self, text=(
+                "The working folder holds the unpacked package while it is "
+                "built. Only the file above is needed to play."),
+                style="Muted.TLabel", wraplength=900).pack(anchor="w",
+                                                           pady=(0, 4))
 
             options = ttk.Frame(self)
             options.pack(fill="x", pady=10)
@@ -898,6 +938,7 @@ def run_gui(args: argparse.Namespace) -> int:
             self.app.has_uo = has_uo
             self.game_status.configure(
                 text=message, foreground=STATUS_OK if valid else STATUS_FAIL)
+            self.refresh_install_status()
             self.start_button.configure(state="normal" if valid else "disabled")
 
         def browse_game(self) -> None:
@@ -905,10 +946,39 @@ def run_gui(args: argparse.Namespace) -> int:
             if selected:
                 self.app.game_dir_var.set(selected)
 
+        def refresh_install_status(self) -> None:
+            install = self.app.fod_install
+            if install is not None:
+                self.install_status.configure(
+                    text=f"Friends of Duty found at {install} — the package "
+                         "will be installed for you.",
+                    foreground=STATUS_OK)
+            elif self.app.package_var.get().strip():
+                self.install_status.configure(
+                    text="Friends of Duty was not found. The package will be "
+                         "written to the path above; copy it into the game's "
+                         "mods folder yourself.",
+                    foreground=STATUS_WARN)
+            else:
+                self.install_status.configure(
+                    text="Friends of Duty was not found. Choose where to save "
+                         "the package, then copy it into the game's mods "
+                         "folder.",
+                    foreground=STATUS_WARN)
+
         def browse_output(self) -> None:
             selected = filedialog.askdirectory(title="Content output folder")
             if selected:
                 self.app.output_var.set(selected)
+
+        def browse_package(self) -> None:
+            selected = filedialog.asksaveasfilename(
+                title="Install the package as",
+                defaultextension=".fodpak",
+                initialfile=fod_install.PACKAGE_NAME,
+                filetypes=[("Friends of Duty package", "*.fodpak")])
+            if selected:
+                self.app.package_var.set(selected)
 
         def start(self) -> None:
             addon_ok, message = importer_addon_status()
@@ -1052,11 +1122,39 @@ def run_gui(args: argparse.Namespace) -> int:
             self.append_log("Cancelling… current step will be terminated.")
             self.cancel_button.configure(state="disabled")
 
+        def install_package(self) -> None:
+            """Write the .fodpak where the game will mount it.
+
+            Done here rather than offered as a button on the next screen: a
+            player who has just waited twenty minutes should not then have to
+            understand what a mods folder is. Failure is recorded on the app
+            and reported by the done screen, never raised -- the package in
+            the working folder is still perfectly good, and a full export is
+            far too expensive to discard over a copy.
+            """
+            self.app.installed_package = None
+            self.app.install_error = None
+            target = self.app.package_var.get().strip()
+            if not target:
+                return
+            destination = Path(target)
+            self.append_log(f"Installing package to {destination}")
+            try:
+                fod_package.write_zip(
+                    Path(self.app.output_var.get()).resolve(), destination)
+            except Exception as error:  # noqa: BLE001 - reported, never fatal
+                self.app.install_error = str(error)
+                self.append_log(f"Install failed: {error}")
+            else:
+                self.app.installed_package = destination
+                self.append_log("Installed.")
+
         def finish(self, error: str | None) -> None:
             self.cancel_button.configure(state="disabled")
             self.back_button.configure(state="normal")
             if error is None:
                 self.progress.configure(value=self.progress["maximum"])
+                self.install_package()
                 self.app.show("done")
             elif error == "cancelled":
                 self.append_log("Export cancelled. Progress is kept; "
@@ -1069,32 +1167,60 @@ def run_gui(args: argparse.Namespace) -> int:
         def __init__(self, parent, app: "ExporterApp") -> None:
             super().__init__(parent)
             self.app = app
-            ttk.Label(self, text="Done — content package ready",
-                      font=("", 16, "bold")).pack(anchor="w")
-            self.summary = ttk.Label(self, text="", wraplength=760, justify="left")
-            self.summary.pack(anchor="w", pady=(4, 12))
+            ttk.Label(self, text="GET READY TO BATTLE",
+                      font=("Segoe UI Semibold", 30)).pack(anchor="w",
+                                                           pady=(10, 0))
+            self.summary = ttk.Label(self, text="", wraplength=900,
+                                     justify="left")
+            self.summary.pack(anchor="w", pady=(8, 4))
+            self.install_line = ttk.Label(self, text="", wraplength=900,
+                                          justify="left")
+            self.install_line.pack(anchor="w", pady=(0, 18))
 
             buttons = ttk.Frame(self)
             buttons.pack(fill="x")
-            ttk.Button(buttons, text="Save transportable .fodpak (zip)…",
-                       command=self.save_zip).pack(side="left")
+            # The one thing a player wants next, sized and styled to say so.
             self.launch_button = ttk.Button(
-                buttons, text="Launch game", command=self.launch_game)
-            self.launch_button.pack(side="left", padx=8)
+                buttons, text="▶  Launch Friends of Duty",
+                style="Primary.TButton", command=self.launch_game)
+            self.launch_button.pack(side="left")
+            ttk.Button(buttons, text="Save a copy…",
+                       command=self.save_zip).pack(side="left", padx=10)
             ttk.Button(buttons, text="Close",
                        command=self.app.destroy).pack(side="right")
-            self.zip_status = ttk.Label(self, text="", wraplength=760)
-            self.zip_status.pack(anchor="w", pady=8)
+            self.zip_status = ttk.Label(self, text="", wraplength=900)
+            self.zip_status.pack(anchor="w", pady=12)
 
         def on_show(self) -> None:
-            content = Path(self.app.output_var.get())
-            self.summary.configure(text=(
-                f"The package was written to:\n{content}\n\n"
-                "The game will mount it automatically on next start. Packages "
-                "generated from your install are for personal use only."))
-            game_exe = self.app.launch_args.game_exe
+            installed = getattr(self.app, "installed_package", None)
+            error = getattr(self.app, "install_error", None)
+            self.summary.configure(
+                text="Your Call of Duty content is ready. It never left this "
+                     "machine, and the package is yours alone.",
+                foreground=TEXT)
+            if installed is not None:
+                self.install_line.configure(
+                    text=f"Installed to {installed}  —  the game will mount it "
+                         "on next start.",
+                    foreground=STATUS_OK)
+            elif error is not None:
+                self.install_line.configure(
+                    text=f"The package was built, but installing it failed: "
+                         f"{error}\nUse Save a copy… and place the file in the "
+                         "game's mods folder.",
+                    foreground=STATUS_FAIL)
+            else:
+                self.install_line.configure(
+                    text="Use Save a copy… and place the file in the game's "
+                         "mods folder.",
+                    foreground=STATUS_WARN)
+            # Steam can start the game whether or not we located the install,
+            # so this is only disabled when there is nothing to launch at all.
+            launchable = (self.app.fod_install is not None
+                          or sys.platform in ("win32", "darwin"))
             self.launch_button.configure(
-                state="normal" if game_exe and Path(game_exe).exists() else "disabled")
+                state="normal" if launchable else "disabled")
+            focus_default(self.launch_button)
 
         def save_zip(self) -> None:
             destination = filedialog.asksaveasfilename(
@@ -1120,14 +1246,36 @@ def run_gui(args: argparse.Namespace) -> int:
             threading.Thread(target=worker, daemon=True).start()
 
         def launch_game(self) -> None:
+            """Hand off to the game, through Steam where possible.
+
+            A --game-exe passed by the launcher wins, because that is the
+            build the player actually started this from. Otherwise ask Steam,
+            which starts the owned copy with its overlay and cloud saves
+            rather than a bare process.
+            """
             game_exe = self.app.launch_args.game_exe
-            try:
-                if sys.platform == "darwin" and str(game_exe).endswith(".app"):
-                    subprocess.Popen(["open", str(game_exe)])
-                else:
-                    subprocess.Popen([str(game_exe)])
-            except OSError as error:
-                messagebox.showerror(APP_TITLE, f"Could not launch the game: {error}")
+            if game_exe and Path(game_exe).exists():
+                try:
+                    if sys.platform == "darwin" and str(game_exe).endswith(".app"):
+                        subprocess.Popen(["open", str(game_exe)])
+                    else:
+                        subprocess.Popen([str(game_exe)])
+                except OSError as error:
+                    messagebox.showerror(
+                        APP_TITLE, f"Could not launch the game: {error}")
+                    return
+                self.app.destroy()
+                return
+
+            ok, detail = fod_install.launch(self.app.fod_install)
+            if not ok:
+                messagebox.showerror(
+                    APP_TITLE,
+                    "Could not launch Friends of Duty.\n\n"
+                    f"{detail}\n\nStart it from Steam; the package is already "
+                    "installed.")
+                return
+            self.app.destroy()
 
     ExporterApp().mainloop()
     return 0
@@ -1171,6 +1319,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--only", nargs="*", help="run only these pipeline step keys")
     parser.add_argument("--zip", type=Path,
                         help="(cli) also write a transportable .fodpak zip")
+    parser.add_argument(
+        "--no-install", action="store_true",
+        help="do not place the package in the detected game's mods folder")
     parser.add_argument("--game-exe", type=Path,
                         help="game executable for the 'Launch game' button")
     parser.add_argument("--game-callback", action="store_true",

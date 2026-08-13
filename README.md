@@ -102,9 +102,21 @@ Download the latest release, unzip it anywhere, and run
 `FriendsOfDutyExporter.exe`. Nothing else is required: the app carries its own
 Python and downloads its own Blender on first use.
 
+It finds things for you. Your Call of Duty install is located through Steam's
+own library index and the usual install folders, and **Friends of Duty is
+located the same way** — so the finished package is written straight into the
+game's `mods/` folder as `cod1.fodpak`, and the last screen offers to launch
+the game. In the normal case you press Export and then Play; no paths, no file
+copying, no mods folder to find.
+
+Both are shown before the export starts and either can be overridden.
+
 ```powershell
 # Or headless, straight to a package:
-.\FriendsOfDutyExporter.exe --cli --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Call of Duty" --output .\out --zip .\out\cod2003.fodpak
+.\FriendsOfDutyExporter.exe --cli --game-dir "C:\Program Files (x86)\Steam\steamapps\common\Call of Duty" --output .\out
+
+# Headless installs into the detected game too. To opt out:
+.\FriendsOfDutyExporter.exe --cli --game-dir "..." --output .\out --no-install
 ```
 
 ### macOS and Linux — from source
