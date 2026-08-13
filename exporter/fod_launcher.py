@@ -86,6 +86,26 @@ def _selftest(argv: list[str]) -> int:
 
         return f"numpy {numpy.__version__}, Pillow {PIL.__version__}"
 
+    def gui() -> str:
+        """Importing tkinter is not evidence that a window can open.
+
+        A frozen build resolves `_tkinter.pyd` from `_internal` happily and
+        then dies inside Tk_Init because `_tcl_data`/`_tk_data` were not
+        collected, so `init.tcl` is missing. That failure surfaces only when
+        a player double-clicks the exe -- and `main()` treats a broken GUI as
+        a reason to fall back to `--cli`, which immediately exits complaining
+        that `--game-dir` is required. The player sees a console blink and
+        nothing else. So build a real root here and tear it down again.
+        """
+        import tkinter
+
+        root = tkinter.Tk()
+        try:
+            root.withdraw()
+            return f"Tk {root.tk.call('info', 'patchlevel')}"
+        finally:
+            root.destroy()
+
     def codecs() -> str:
         """Pillow discovers plugins by scanning; a frozen build can lose them.
 
@@ -116,6 +136,7 @@ def _selftest(argv: list[str]) -> int:
         return f"{blender_provisioner.pinned_version_label()} {entry['target']}"
 
     check("frozen imports", imports)
+    check("GUI toolkit", gui)
     check("Pillow codecs", codecs)
     check("CA bundle", certificates)
     check("Blender pin", pin)
