@@ -69,7 +69,18 @@ LINK_HOVER = "#d7e4ee"
 STATUS_OK = "#7bd88f"
 STATUS_WARN = "#ffc46b"
 STATUS_FAIL = "#ff8080"
+FOCUS = "#9fb4c4"
 BAND_HEIGHT = 120
+
+# Steam Deck is 1280x800, and Gaming Mode runs a window full-screen at that
+# size, so the layout is built for 16:10 at exactly those numbers rather than
+# scaled down from a desktop shape. The minimum keeps 16:10 as the window
+# shrinks; below this the step list starts clipping.
+WINDOW_SIZE = "1280x800"
+WINDOW_MIN = (1120, 700)
+#: Button padding. A Deck player drives the cursor with a thumbstick or
+#: trackpad, where a 6px-tall target is genuinely hard to hit.
+TOUCH_PAD = (18, 11)
 
 
 # ---------------------------------------------------------------- requirements
@@ -438,22 +449,111 @@ def run_gui(args: argparse.Namespace) -> int:
         style.configure("Heading.TLabel", background=PANEL, foreground=TEXT,
                         font=("Segoe UI Semibold", 15))
         style.configure("Band.TLabel", background=INK, foreground=MUTED)
+        # Sized for a Steam Deck held at arm's length and driven by a stick,
+        # not for a mouse pointer at a desk: TOUCH_PAD gives every button a
+        # hit target a trackpad-emulated cursor can actually land on, and
+        # focusthickness draws a visible ring, which is the only way a player
+        # tabbing with a controller can tell where they are.
         style.configure("TButton", background=BUTTON, foreground=TEXT,
-                        bordercolor=LINE, focusthickness=0, padding=(12, 6))
+                        bordercolor=LINE, focusthickness=2,
+                        focuscolor=FOCUS, padding=TOUCH_PAD,
+                        font=("Segoe UI", 11))
         style.map("TButton",
                   background=[("active", BUTTON_HOVER),
+                              ("focus", BUTTON_HOVER),
                               ("disabled", PANEL)],
                   foreground=[("disabled", DISABLED)])
-        style.configure("Primary.TButton", background=STEEL, foreground="#0b0d0f")
+        style.configure("Primary.TButton", background=STEEL,
+                        foreground="#0b0d0f", font=("Segoe UI Semibold", 11))
         style.map("Primary.TButton",
-                  background=[("active", "#7d8a94"), ("disabled", PANEL)],
+                  background=[("active", "#7d8a94"), ("focus", "#7d8a94"),
+                              ("disabled", PANEL)],
                   foreground=[("disabled", DISABLED)])
         style.configure("TEntry", fieldbackground=FIELD, foreground=TEXT,
-                        bordercolor=LINE, insertcolor=TEXT, padding=4)
-        style.configure("TCheckbutton", background=PANEL, foreground=TEXT)
+                        bordercolor=LINE, insertcolor=TEXT, padding=7)
+        style.configure("TCheckbutton", background=PANEL, foreground=TEXT,
+                        focuscolor=FOCUS, padding=4)
         style.map("TCheckbutton", background=[("active", PANEL)])
         style.configure("TProgressbar", background=STEEL, troughcolor=FIELD,
-                        bordercolor=LINE, lightcolor=STEEL, darkcolor=STEEL)
+                        bordercolor=LINE, lightcolor=STEEL, darkcolor=STEEL,
+                        thickness=18)
+        # Treeview ignores the "." defaults entirely -- it is drawn from its
+        # own element options -- so without this the step list on the export
+        # screen stays a white slab in the middle of a dark window.
+        style.configure("Treeview", background=FIELD, fieldbackground=FIELD,
+                        foreground=TEXT, bordercolor=LINE, borderwidth=0,
+                        rowheight=30, font=("Segoe UI", 10))
+        style.map("Treeview",
+                  background=[("selected", STEEL)],
+                  foreground=[("selected", INK)])
+        style.configure("Treeview.Heading", background=BUTTON, foreground=TEXT,
+                        relief="flat", padding=6,
+                        font=("Segoe UI Semibold", 10))
+        style.map("Treeview.Heading",
+                  background=[("active", BUTTON_HOVER)])
+        for orient in ("Vertical", "Horizontal"):
+            style.configure(f"{orient}.TScrollbar", background=BUTTON,
+                            troughcolor=PANEL, bordercolor=LINE,
+                            arrowcolor=MUTED, lightcolor=BUTTON,
+                            darkcolor=BUTTON, width=16)
+            style.map(f"{orient}.TScrollbar",
+                      background=[("active", BUTTON_HOVER)])
+
+    def install_controller_navigation(root: tk.Tk) -> None:
+        """Make the window usable without a mouse.
+
+        Steam Input presents a controller to the desktop as keyboard and
+        mouse, so "joystick friendly" in practice means "keyboard friendly":
+        the d-pad arrives as arrow keys and A as Return or space. Tk gives Tab
+        traversal and space-activates-a-button for free; what it does not give
+        is arrow-key traversal or Return, which is what a player will press
+        first. Bound on the toplevel so every screen inherits it.
+        """
+        def move(delta: int):
+            def handler(event):
+                widget = root.focus_get()
+                if widget is None or isinstance(widget, tk.Text):
+                    return None
+                try:
+                    nxt = widget.tk_focusNext() if delta > 0 else \
+                        widget.tk_focusPrev()
+                except tk.TclError:
+                    return None
+                if nxt is not None:
+                    nxt.focus_set()
+                return "break"
+            return handler
+
+        def activate(event):
+            widget = root.focus_get()
+            if widget is None or isinstance(widget, tk.Text):
+                return None
+            try:
+                if str(widget.cget("state")) == "disabled":
+                    return "break"
+                widget.invoke()
+            except (AttributeError, tk.TclError):
+                return None
+            return "break"
+
+        for key in ("<Down>", "<Right>"):
+            root.bind_all(key, move(1))
+        for key in ("<Up>", "<Left>"):
+            root.bind_all(key, move(-1))
+        root.bind_all("<Return>", activate)
+        root.bind_all("<KP_Enter>", activate)
+
+    def focus_default(widget) -> None:
+        """Put the caret somewhere useful when a screen appears.
+
+        Without this a controller player lands on a window with no focus at
+        all, and the first d-pad press does nothing visible.
+        """
+        try:
+            if str(widget.cget("state")) != "disabled":
+                widget.focus_set()
+        except (AttributeError, tk.TclError):
+            pass
 
     def install_icon(root: tk.Tk) -> None:
         """Taskbar and title-bar icon. Never fatal: it is decoration."""
@@ -511,11 +611,10 @@ def run_gui(args: argparse.Namespace) -> int:
         def __init__(self) -> None:
             super().__init__()
             self.title(APP_TITLE)
-            # Taller than before: the band takes 120px off the top and the
-            # requirements list must still fit without the log pane collapsing.
-            self.geometry("960x720")
-            self.minsize(880, 660)
+            self.geometry(WINDOW_SIZE)
+            self.minsize(*WINDOW_MIN)
             install_theme(self)
+            install_controller_navigation(self)
             install_icon(self)
             build_band(self)
             build_footer(self)
@@ -581,7 +680,7 @@ def run_gui(args: argparse.Namespace) -> int:
             ):
                 row = ttk.Frame(self.rows)
                 row.pack(fill="x", pady=2)
-                ttk.Label(row, text=title, width=20).pack(side="left")
+                ttk.Label(row, text=title, width=26).pack(side="left")
                 label = ttk.Label(row, text="…", wraplength=580, justify="left")
                 label.pack(side="left", fill="x", expand=True)
                 self.status_labels[key] = label
@@ -613,14 +712,20 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk.Button(buttons, text="Re-check",
                        command=self.refresh).pack(side="left")
             self.next_button = ttk.Button(
-                buttons, text="Continue →", command=lambda: app.show("paths"))
+                buttons, text="Continue →", style="Primary.TButton",
+                command=lambda: app.show("paths"))
             self.next_button.pack(side="right")
             self.pip_status = ttk.Label(self, text="", wraplength=760)
             self.pip_status.pack(anchor="w")
 
             self.build_running = False
+            # This pane only ever shows output from the two source-checkout
+            # repair buttons above, which a bundle does not offer. Packing it
+            # anyway left the shipped requirements screen two thirds empty
+            # black rectangle under five green lines.
             log_frame = ttk.Frame(self)
-            log_frame.pack(fill="both", expand=True, pady=(6, 0))
+            if not fod_paths.is_bundled():
+                log_frame.pack(fill="both", expand=True, pady=(6, 0))
             # Consolas rather than Menlo: Menlo does not exist on Windows, and
             # Tk silently substitutes a proportional face, which turns a log of
             # aligned paths into ragged prose.
@@ -637,6 +742,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
         def on_show(self) -> None:
             self.refresh()
+            focus_default(self.next_button)
 
         def set_status(self, key: str, ok: bool, message: str,
                        warn_only: bool = False) -> None:
@@ -746,7 +852,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
             game_row = ttk.Frame(self)
             game_row.pack(fill="x", pady=2)
-            ttk.Label(game_row, text="Call of Duty folder", width=20).pack(side="left")
+            ttk.Label(game_row, text="Call of Duty folder", width=26).pack(side="left")
             ttk.Entry(game_row, textvariable=app.game_dir_var).pack(
                 side="left", fill="x", expand=True)
             ttk.Button(game_row, text="Browse…",
@@ -756,7 +862,7 @@ def run_gui(args: argparse.Namespace) -> int:
 
             out_row = ttk.Frame(self)
             out_row.pack(fill="x", pady=2)
-            ttk.Label(out_row, text="Output folder", width=20).pack(side="left")
+            ttk.Label(out_row, text="Output folder", width=26).pack(side="left")
             ttk.Entry(out_row, textvariable=app.output_var).pack(
                 side="left", fill="x", expand=True)
             ttk.Button(out_row, text="Browse…",
@@ -772,12 +878,14 @@ def run_gui(args: argparse.Namespace) -> int:
             ttk.Button(buttons, text="← Back",
                        command=lambda: app.show("requirements")).pack(side="left")
             self.start_button = ttk.Button(
-                buttons, text="Start Export →", command=self.start)
+                buttons, text="Start Export →", style="Primary.TButton",
+                command=self.start)
             self.start_button.pack(side="right")
             app.game_dir_var.trace_add("write", lambda *_: self.refresh())
 
         def on_show(self) -> None:
             self.refresh()
+            focus_default(self.start_button)
 
         def refresh(self) -> None:
             raw = self.app.game_dir_var.get().strip()
@@ -836,6 +944,19 @@ def run_gui(args: argparse.Namespace) -> int:
             self.progress = ttk.Progressbar(self, mode="determinate")
             self.progress.pack(fill="x", pady=(0, 6))
 
+            # Buttons first, anchored to the bottom, because the log pane below
+            # expands: packed after it they were squeezed off the bottom edge
+            # of the window and Cancel became unreachable mid-export.
+            buttons = ttk.Frame(self)
+            buttons.pack(side="bottom", fill="x", pady=(10, 0))
+            self.cancel_button = ttk.Button(buttons, text="Cancel",
+                                            command=self.cancel)
+            self.cancel_button.pack(side="left")
+            self.back_button = ttk.Button(
+                buttons, text="← Back", state="disabled",
+                command=lambda: app.show("paths"))
+            self.back_button.pack(side="right")
+
             log_frame = ttk.Frame(self)
             log_frame.pack(fill="both", expand=True)
             self.log_text = tk.Text(log_frame, height=10, state="disabled",
@@ -848,16 +969,6 @@ def run_gui(args: argparse.Namespace) -> int:
             self.log_text.configure(yscrollcommand=scroll.set)
             self.log_text.pack(side="left", fill="both", expand=True)
             scroll.pack(side="right", fill="y")
-
-            buttons = ttk.Frame(self)
-            buttons.pack(fill="x", pady=8)
-            self.cancel_button = ttk.Button(buttons, text="Cancel",
-                                            command=self.cancel)
-            self.cancel_button.pack(side="left")
-            self.back_button = ttk.Button(
-                buttons, text="← Back", state="disabled",
-                command=lambda: app.show("paths"))
-            self.back_button.pack(side="right")
 
         def start(self, cfg: fod_pipeline.PipelineConfig) -> None:
             self.cancel_event.clear()

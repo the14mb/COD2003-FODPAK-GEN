@@ -38,10 +38,49 @@ STEAM_DIR_NAMES = (
 NEARBY_SEARCH_DEPTH = 6
 
 
+def _steam_root_from_registry() -> Path | None:
+    """Where Steam actually is, according to Windows.
+
+    The guesses below only cover Steam installed somewhere conventional. This
+    is the authoritative answer, and it matters most for exactly the player
+    this tool is hardest for: someone who put Steam on a second drive, whose
+    library index we then never read, whose games we then never find, and who
+    is then handed a folder picker -- on Steam Deck Gaming Mode, a folder
+    picker is barely usable with a controller.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+    for hive, key in (
+        (winreg.HKEY_CURRENT_USER, r"Software\Valve\Steam"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam"),
+        (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Valve\Steam"),
+    ):
+        try:
+            with winreg.OpenKey(hive, key) as handle:
+                for value in ("SteamPath", "InstallPath"):
+                    try:
+                        raw, _kind = winreg.QueryValueEx(handle, value)
+                    except OSError:
+                        continue
+                    path = Path(str(raw).replace("/", "\\"))
+                    if path.is_dir():
+                        return path
+        except OSError:
+            continue
+    return None
+
+
 def _steam_roots() -> list[Path]:
     roots: list[Path] = []
     home = Path.home()
     if sys.platform == "win32":
+        registered = _steam_root_from_registry()
+        if registered is not None:
+            roots.append(registered)
         for variable in ("ProgramFiles(x86)", "ProgramFiles"):
             base = os.environ.get(variable)
             if base:
@@ -112,7 +151,14 @@ def candidates() -> list[Path]:
             base = os.environ.get(variable)
             if not base:
                 continue
-            add(Path(base) / "Call of Duty")
+            # Every retail folder name, not just "Call of Duty": the disc
+            # installer writes "Call of Duty Game of the Year Edition", which
+            # was previously reached only by the bounded drive scan below and
+            # so depended on that scan's ordering and budget. Naming the exact
+            # paths makes the common case deterministic and instant.
+            for name in STEAM_DIR_NAMES:
+                add(Path(base) / name)
+                add(Path(base) / "Steam" / "steamapps" / "common" / name)
             add(Path(base) / "Activision" / "Call of Duty")
         for candidate in _windows_drive_candidates():
             add(candidate)
