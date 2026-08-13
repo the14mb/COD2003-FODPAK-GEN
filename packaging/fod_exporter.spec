@@ -21,14 +21,30 @@
 import json
 import os
 import pathlib
+import sys
 
 REPO = pathlib.Path(os.environ["FOD_REPO_ROOT"]).resolve()
 HIDDEN = json.loads(os.environ["FOD_HIDDEN_IMPORTS"])
 
+# The cod_asset_importer extension is built against the stable ABI, so it
+# imports python3.dll -- the forwarder -- and not python312.dll. PyInstaller
+# collects only the versioned DLL, because a frozen app has no other reason to
+# want the forwarder, so loading the extension fails with a bare "DLL load
+# failed". Nothing on the --cli path notices: there the importer is only ever
+# loaded inside Blender, which brings its own Python. It is the GUI's
+# requirements screen that probes the extension in-process, so the failure
+# lands on exactly the path a player takes and on no other.
+BINARIES = []
+if sys.platform == "win32":
+    forwarder = pathlib.Path(sys.base_prefix) / "python3.dll"
+    if not forwarder.is_file():
+        raise SystemExit(f"stable-ABI forwarder missing: {forwarder}")
+    BINARIES.append((str(forwarder), "."))
+
 a = Analysis(
     [str(REPO / "exporter" / "fod_launcher.py")],
     pathex=[str(REPO / "exporter"), str(REPO / "tools")],
-    binaries=[],
+    binaries=BINARIES,
     datas=[],
     hiddenimports=HIDDEN,
     hookspath=[],

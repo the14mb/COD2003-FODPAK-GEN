@@ -161,20 +161,23 @@ def artifact_lod_api_version(path: Path) -> tuple[int | None, str]:
     Returning zero is a valid v3.5 LOD0-only module. None means the extension
     could not be imported at all.
     """
-    probe = (
-        "import importlib.util, pathlib, sys\n"
-        "path = pathlib.Path(sys.argv[1]).resolve()\n"
-        "spec = importlib.util.spec_from_file_location("
-        "'_fod_probe.cod_asset_importer', path)\n"
-        "module = importlib.util.module_from_spec(spec)\n"
-        "spec.loader.exec_module(module)\n"
-        "print(getattr(module, 'XMODEL_LOD_API_VERSION', 0))\n"
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", probe, str(path)],
-        capture_output=True,
-        text=True,
-    )
+    if getattr(sys, "frozen", False):
+        # sys.executable is the PyInstaller binary, which has no -c. It
+        # re-executes itself instead; see fod_launcher.PROBE_IMPORTER_FLAG,
+        # which runs exactly the probe below in the spawned child.
+        command = [sys.executable, "--fod-probe-importer", str(path)]
+    else:
+        probe = (
+            "import importlib.util, pathlib, sys\n"
+            "path = pathlib.Path(sys.argv[1]).resolve()\n"
+            "spec = importlib.util.spec_from_file_location("
+            "'_fod_probe.cod_asset_importer', path)\n"
+            "module = importlib.util.module_from_spec(spec)\n"
+            "spec.loader.exec_module(module)\n"
+            "print(getattr(module, 'XMODEL_LOD_API_VERSION', 0))\n"
+        )
+        command = [sys.executable, "-c", probe, str(path)]
+    result = subprocess.run(command, capture_output=True, text=True)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         return None, detail or "native module probe failed"

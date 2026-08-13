@@ -29,6 +29,7 @@ import sys
 RUN_TOOL_FLAG = "--fod-run-tool"
 SELFTEST_FLAG = "--fod-selftest"
 PROBE_BLENDER_FLAG = "--fod-probe-blender"
+PROBE_IMPORTER_FLAG = "--fod-probe-importer"
 DETECT_COD_FLAG = "--fod-detect-cod"
 
 EXPORTER_DIR = pathlib.Path(__file__).resolve().parent
@@ -106,6 +107,22 @@ def _selftest(argv: list[str]) -> int:
         finally:
             root.destroy()
 
+    def importer() -> str:
+        """The same gate the GUI's first screen puts in front of the player.
+
+        Worth asserting here precisely because it is not on the --cli path: a
+        headless export verifies the importer inside Blender, so every CLI test
+        can pass while a double-clicked exe refuses to leave Step 1. This calls
+        what the requirements screen calls, so a payload that would strand a
+        player fails the build instead.
+        """
+        import build_importer
+
+        ok, message = build_importer.check(require_lod=True)
+        if not ok:
+            raise RuntimeError(message)
+        return message
+
     def codecs() -> str:
         """Pillow discovers plugins by scanning; a frozen build can lose them.
 
@@ -137,6 +154,7 @@ def _selftest(argv: list[str]) -> int:
 
     check("frozen imports", imports)
     check("GUI toolkit", gui)
+    check("importer probe", importer)
     check("Pillow codecs", codecs)
     check("CA bundle", certificates)
     check("Blender pin", pin)
@@ -176,6 +194,38 @@ def _probe_blender(argv: list[str]) -> int:
     return 0
 
 
+def _probe_importer(argv: list[str]) -> int:
+    """`--fod-probe-importer <path>` — print the extension's LOD API version.
+
+    build_importer.artifact_lod_api_version loads the native module in a child
+    process on purpose: a .pyd built for another interpreter can abort the host
+    outright rather than raise. It used to spawn `sys.executable -c <probe>`,
+    which is correct from a checkout and impossible from a frozen build, where
+    sys.executable is this binary and argparse rejects `-c`. The requirements
+    screen then reported the shipped importer as missing and refused to let the
+    player continue -- on the GUI path only, because a --cli export verifies the
+    importer inside Blender instead and never ran this.
+
+    Re-executing ourselves keeps the isolation and needs no interpreter.
+    """
+    import importlib.util
+
+    if not argv:
+        print("fod: --fod-probe-importer needs a path", file=sys.stderr)
+        return 2
+    path = pathlib.Path(argv[0]).resolve()
+    spec = importlib.util.spec_from_file_location(
+        "_fod_probe.cod_asset_importer", path
+    )
+    if spec is None or spec.loader is None:
+        print(f"fod: cannot load {path}", file=sys.stderr)
+        return 1
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    print(getattr(module, "XMODEL_LOD_API_VERSION", 0))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Before ANY dispatch. The payload's .py files ship loose beside the
@@ -195,6 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         return _selftest(argv[1:])
     if argv and argv[0] == PROBE_BLENDER_FLAG:
         return _probe_blender(argv[1:])
+    if argv and argv[0] == PROBE_IMPORTER_FLAG:
+        return _probe_importer(argv[1:])
     if argv and argv[0] == DETECT_COD_FLAG:
         import cod_autodetect
 
