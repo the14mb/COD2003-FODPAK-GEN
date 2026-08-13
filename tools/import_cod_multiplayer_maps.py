@@ -4526,6 +4526,18 @@ LAMP_LIGHTMAP_RAY_EPSILON_COD = 2.0
 # in the tens of thousands on the largest shipping maps while keeping the
 # per-cell triangle lists short enough for the vectorized any-hit tests.
 LAMP_LIGHTMAP_GRID_CELL_COD = 128.0
+# Ceiling on the dense cell count, because that count is allocated twice as
+# int64 (the bincount and the CSR offset array) and the nominal cell size above
+# only keeps it small for maps whose geometry stays near the play area.
+# mp_cassino's draw soup spans 182528 x 133888 x 45358 CoD units -- about ten
+# times Carentan per axis -- which is 535,150,497 cells and 7.97 GiB of offsets
+# alone. That completes on a workstation with most of its memory free and fails
+# outright on a machine a player is likely to own. 2**24 cells is 256 MB for
+# the pair. Only the two maps whose geometry strays far from the play area are
+# affected: Cassino drops to 512-unit cells (8,624,616) and Chateau to 256-unit
+# (7,115,724, down from 55,539,918). Arnhem, Carentan, Pavlov, Railyard and
+# Rocket all sit under 500k cells and keep the nominal size untouched.
+LAMP_LIGHTMAP_GRID_MAX_CELLS = 16777216
 # Contributions below half a stored-byte quantum cannot change the encoded
 # dLDR pixel (pixel = clamp(E/2)*255), so their rays are never cast. This is
 # what keeps the bake at minutes per map: only texels a lamp meaningfully
@@ -4659,13 +4671,38 @@ class TriangleOcclusionGrid:
         hi = corners.max(axis=1)
         # One-cell padding on every side so ray origins nudged off a hull
         # surface (and lamps hovering just outside it) still start in-grid.
-        self._origin = lo.min(axis=0) - self._cell
-        self._dims = (
-            np.floor((hi.max(axis=0) - self._origin) / self._cell).astype(
-                np.int64
+        #
+        # Widen the cells until the dense arrays fit LAMP_LIGHTMAP_GRID_MAX_CELLS.
+        # This cannot move the bake's output: the grid only nominates candidate
+        # triangles for the exact Moller-Trumbore test in _intersects, the query
+        # is any-hit so testing a triangle more than once is harmless, and the
+        # DDA's per-ray step bound is derived from _dims, which shrinks with the
+        # grid. A coarser grid therefore costs traversal work and returns the
+        # identical answer. Maps already inside the budget take the first branch
+        # and keep both their nominal cell size and their byte-identical output.
+        nominal_cells = None
+        while True:
+            origin = lo.min(axis=0) - self._cell
+            dims = (
+                np.floor((hi.max(axis=0) - origin) / self._cell).astype(
+                    np.int64
+                )
+                + 2
             )
-            + 2
-        )
+            cells = int(dims.prod())
+            if cells <= LAMP_LIGHTMAP_GRID_MAX_CELLS:
+                break
+            if nominal_cells is None:
+                nominal_cells = cells
+            self._cell *= 2.0
+        if nominal_cells is not None:
+            print(
+                "  lamp occlusion grid widened to %.0f-unit cells: %d cells "
+                "in place of %d at the nominal %.0f"
+                % (self._cell, cells, nominal_cells, float(cell_size))
+            )
+        self._origin = origin
+        self._dims = dims
         lo_cell = np.clip(
             np.floor((lo - self._origin) / self._cell).astype(np.int64),
             0,

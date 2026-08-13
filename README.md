@@ -31,6 +31,31 @@ recognise, rather than silently producing a broken package.
 
 ---
 
+## Minimum requirements
+
+To run the released **standalone app**, this is the whole list. You do not need
+Python, Blender, Rust, or a compiler — the app carries its own interpreter and
+fetches its own Blender.
+
+| | Minimum |
+|---|---|
+| **OS** | Windows 10 or 11, 64-bit. This build is Windows-only. |
+| **CPU** | Any x86-64 processor. |
+| **RAM** | 4 GB. A full export peaks at ~1.3 GB across the generator and Blender together, measured during the player step. |
+| **Disk** | 4 GB free: ~0.9 GB Blender cache, ~0.4 GB the download it is extracted from, ~0.6 GB for the `.fodpak`, plus the unpacked package and staging. |
+| **Internet** | First run only — a one-time 381 MB Blender download. Later runs are fully offline. |
+| **Game** | Call of Duty **and** United Offensive, patched and installed together: all 14 retail `Main\*.pk3` and all 8 `uo\*.pk3`. A disc install without patch 1.5 / 1.51 is missing some of these and is rejected by name. |
+| **Time** | About 22 minutes on an 8-thread desktop once Blender is cached, plus the one-time download on the first run. The map and player steps are three quarters of it. |
+
+`.fodpak` packages carry nothing platform-specific, so one built on any Windows
+machine works on every platform Friends of Duty runs on — including macOS and
+Steam Deck, which have no exporter of their own.
+
+Running from **source** instead of the released app additionally needs Python
+3.10+ with `Pillow` and `numpy`; see [Requirements](#requirements) below.
+
+---
+
 ## Screenshots
 
 <!-- Screenshots to be added. Capture at 1920x1080, PNG, and drop into
@@ -96,6 +121,10 @@ git submodule update --init --recursive
 ---
 
 ## Requirements
+
+Everything the released app needs is in [Minimum
+requirements](#minimum-requirements) above. This section is what a **source
+checkout** needs on top of that, and how the two self-provisioning pieces work.
 
 | | |
 |---|---|
