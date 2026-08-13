@@ -78,7 +78,12 @@ BAND_HEIGHT = 120
 # scaled down from a desktop shape. The minimum keeps 16:10 as the window
 # shrinks; below this the step list starts clipping.
 WINDOW_SIZE = "1280x800"
-WINDOW_MIN = (1120, 700)
+#: Well under the Deck's 1280x800 so the window is resizable rather than
+#: merely Deck-shaped. Everything between here and full size is handled by the
+#: step list and the log sharing the slack; the fixed furniture -- band,
+#: footer, title, progress bar, buttons -- comes to about 285px, which leaves
+#: room for both at their minimums.
+WINDOW_MIN = (1000, 640)
 #: Button padding. A Deck player drives the cursor with a thumbstick or
 #: trackpad, where a 6px-tall target is genuinely hard to hit.
 TOUCH_PAD = (18, 11)
@@ -494,7 +499,7 @@ def run_gui(args: argparse.Namespace) -> int:
         # screen stays a white slab in the middle of a dark window.
         style.configure("Treeview", background=FIELD, fieldbackground=FIELD,
                         foreground=TEXT, bordercolor=LINE, borderwidth=0,
-                        rowheight=30, font=("Segoe UI", 10))
+                        rowheight=24, font=("Segoe UI", 10))
         style.map("Treeview",
                   background=[("selected", STEEL)],
                   foreground=[("selected", INK)])
@@ -1003,16 +1008,6 @@ def run_gui(args: argparse.Namespace) -> int:
 
             ttk.Label(self, text="Step 3 — Exporting",
                       font=("", 16, "bold")).pack(anchor="w")
-            self.tree = ttk.Treeview(
-                self, columns=("status",), show="tree headings", height=13)
-            self.tree.heading("#0", text="Step")
-            self.tree.heading("status", text="Status")
-            self.tree.column("#0", width=420)
-            self.tree.column("status", width=140)
-            self.tree.pack(fill="x", pady=(6, 6))
-
-            self.progress = ttk.Progressbar(self, mode="determinate")
-            self.progress.pack(fill="x", pady=(0, 6))
 
             # Buttons first, anchored to the bottom, because the log pane below
             # expands: packed after it they were squeezed off the bottom edge
@@ -1027,9 +1022,34 @@ def run_gui(args: argparse.Namespace) -> int:
                 command=lambda: app.show("paths"))
             self.back_button.pack(side="right")
 
+            self.progress = ttk.Progressbar(self, mode="determinate")
+            self.progress.pack(side="bottom", fill="x", pady=(6, 0))
+
+            # The step list scrolls and shares the remaining height with the
+            # log rather than reserving a fixed block. Nineteen rows never fit
+            # a 1280x800 Deck screen beside a log and a button row, and a
+            # fixed-height tree does not give way when the window shrinks: it
+            # pushed the log out entirely and clipped the buttons to blank
+            # rectangles. A small requested height plus expand lets it use
+            # whatever is going and surrender it when there is none.
+            tree_frame = ttk.Frame(self)
+            tree_frame.pack(fill="both", expand=True, pady=(6, 0))
+            self.tree = ttk.Treeview(
+                tree_frame, columns=("status",), show="tree headings",
+                height=6)
+            self.tree.heading("#0", text="Step")
+            self.tree.heading("status", text="Status")
+            self.tree.column("#0", width=420)
+            self.tree.column("status", width=140, anchor="w", stretch=False)
+            tree_scroll = ttk.Scrollbar(tree_frame, orient="vertical",
+                                        command=self.tree.yview)
+            self.tree.configure(yscrollcommand=tree_scroll.set)
+            self.tree.pack(side="left", fill="both", expand=True)
+            tree_scroll.pack(side="right", fill="y")
+
             log_frame = ttk.Frame(self)
-            log_frame.pack(fill="both", expand=True)
-            self.log_text = tk.Text(log_frame, height=10, state="disabled",
+            log_frame.pack(fill="both", expand=True, pady=(6, 0))
+            self.log_text = tk.Text(log_frame, height=6, state="disabled",
                                     wrap="none", font=("Consolas", 10),
                                     bg=FIELD, fg=TEXT, insertbackground=TEXT,
                                     relief="flat", highlightthickness=1,
@@ -1100,6 +1120,11 @@ def run_gui(args: argparse.Namespace) -> int:
                         _, index, total, key, status = message
                         if self.tree.exists(key):
                             self.tree.set(key, "status", status)
+                            # The list scrolls now, so the running step has to
+                            # be scrolled to or a player watching a 22-minute
+                            # export sees a static list of "pending".
+                            if status == "running":
+                                self.tree.see(key)
                         completed = index + (1 if status in ("done", "skipped") else 0)
                         self.progress.configure(value=completed)
                     elif message[0] == "finished":
