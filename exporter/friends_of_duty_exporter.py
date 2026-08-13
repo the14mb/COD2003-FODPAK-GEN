@@ -395,7 +395,6 @@ def run_gui(args: argparse.Namespace) -> int:
             self.geometry("860x620")
             self.minsize(760, 540)
             self.launch_args = args
-            self.blender_var = tk.StringVar()
             self.game_dir_var = tk.StringVar(
                 value=str(args.game_dir) if args.game_dir else "")
             self.output_var = tk.StringVar(value=str(args.output))
@@ -462,24 +461,30 @@ def run_gui(args: argparse.Namespace) -> int:
                 label.pack(side="left", fill="x", expand=True)
                 self.status_labels[key] = label
 
-            blender_row = ttk.Frame(self)
-            blender_row.pack(fill="x", pady=(10, 2))
-            ttk.Label(blender_row, text="Blender path", width=20).pack(side="left")
-            ttk.Entry(blender_row, textvariable=app.blender_var).pack(
-                side="left", fill="x", expand=True)
-            ttk.Button(blender_row, text="Browse…",
-                       command=self.browse_blender).pack(side="left", padx=4)
-
+            # No Blender picker. The exporter provisions the pinned 4.5.1 build
+            # itself, and offering a browse box next to a line that already says
+            # it will be downloaded automatically reads as an unmet requirement:
+            # players went looking for a Blender to select. Worse, any build a
+            # player found would be the wrong one -- 4.2 and 4.5 emit measurably
+            # different GLBs from identical input, which is the whole reason the
+            # version is pinned rather than minimum-versioned. Developers who
+            # need to aim at a specific build still have --blender.
             buttons = ttk.Frame(self)
             buttons.pack(fill="x", pady=12)
+            # Both of these repair a source checkout, and a shipped payload
+            # carries what they would install, so in a bundle they are dead
+            # controls that can only ever appear greyed out beside a green
+            # requirement. Build them either way so refresh() stays uniform,
+            # but only show them where they can actually do something.
             self.pip_button = ttk.Button(
                 buttons, text="Install Python packages (pip)",
                 command=self.install_packages)
-            self.pip_button.pack(side="left")
             self.build_button = ttk.Button(
                 buttons, text="Prepare importer",
                 command=self.build_importer)
-            self.build_button.pack(side="left", padx=6)
+            if not fod_paths.is_bundled():
+                self.pip_button.pack(side="left")
+                self.build_button.pack(side="left", padx=6)
             ttk.Button(buttons, text="Re-check",
                        command=self.refresh).pack(side="left")
             self.next_button = ttk.Button(
@@ -514,10 +519,10 @@ def run_gui(args: argparse.Namespace) -> int:
             self.set_status("pillow", ok_pillow, message)
             ok_numpy, message = module_ok("numpy")
             self.set_status("numpy", ok_numpy, message)
-            # Status only — never a download. This runs on every refresh and
-            # on every Browse, and a UI refresh must not start pulling 300 MB.
-            # The acquisition happens once, inside the export worker, where it
-            # has a progress bar and a Cancel button.
+            # Status only — never a download. This runs on every refresh, and a
+            # UI refresh must not start pulling 300 MB. The acquisition happens
+            # once, inside the export worker, where it has a progress bar and a
+            # Cancel button.
             blender_ok, message = blender_status()
             self.set_status("blender", blender_ok, message, warn_only=False)
             addon_ok, message = importer_addon_status()
@@ -538,12 +543,6 @@ def run_gui(args: argparse.Namespace) -> int:
                 addon_ok
             )
             self.next_button.configure(state="normal" if core_ok else "disabled")
-
-        def browse_blender(self) -> None:
-            selected = filedialog.askopenfilename(title="Select the Blender executable")
-            if selected:
-                self.app.blender_var.set(selected)
-                self.refresh()
 
         def install_packages(self) -> None:
             self.pip_button.configure(state="disabled")
@@ -744,10 +743,8 @@ def run_gui(args: argparse.Namespace) -> int:
                     # Acquire Blender first, on this thread, so the download
                     # gets the log pane and the Cancel button rather than
                     # freezing the UI from a refresh handler.
-                    manual = (self.app.blender_var.get().strip() or None)
                     blender, message = find_blender(
-                        Path(manual) if manual
-                        else self.app.launch_args.blender,
+                        self.app.launch_args.blender,
                         log=emit,
                         cancel=self.cancel_event,
                     )
