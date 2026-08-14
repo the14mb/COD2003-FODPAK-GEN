@@ -3,7 +3,48 @@
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
+
+
+@functools.lru_cache(maxsize=16)
+def _dir_index(root: Path) -> dict[str, str]:
+    """Case-folded name -> actual on-disk name, for one directory.
+
+    Cached because it is consulted once per animation field per weapon, and
+    the xanim directory alone holds ~688 entries.
+    """
+    try:
+        return {
+            entry.name.casefold(): entry.name
+            for entry in root.iterdir()
+            if entry.is_file()
+        }
+    except OSError:
+        return {}
+
+
+def resolve_file(root: Path, name: str) -> str | None:
+    """The on-disk spelling of a file, or None when it truly is absent.
+
+    Call of Duty's own data disagrees with itself about case: the luger's
+    WEAPONFILE asks for `viewmodel_luger_ads_up` and the pk3 stores
+    `viewmodel_luger_ADS_up`. That went unnoticed for twenty years because
+    Windows and macOS filesystems are case-insensitive, so an exact-case
+    lookup finds the file anyway. Linux is case-sensitive, so on a Steam Deck
+    the viewmodels step aborted with "active viewmodel XAnim source(s)
+    missing" for a file sitting right there.
+
+    The exact spelling is tried first, so on a case-insensitive filesystem
+    this returns the WEAPONFILE's own spelling exactly as before and the
+    emitted metadata is unchanged. Only a case-sensitive filesystem, where
+    the alternative is failing outright, sees the on-disk name instead --
+    which is also the name every consumer needs, since these strings are used
+    directly as paths under xanim/.
+    """
+    if (root / name).is_file():
+        return name
+    return _dir_index(root).get(name.casefold())
 
 
 # Ordered exactly as the source fields should be evaluated. The role names are
@@ -63,9 +104,12 @@ def weapon_animation_metadata(
     """
     weapon_root = source_root / "weapons" / "mp"
     xanim_root = source_root / "xanim"
-    primary_path = weapon_root / primary_weapon_file
-    if not primary_path.is_file():
-        raise FileNotFoundError(primary_path)
+    # Resolved for the same reason as the XAnims below: these names come out
+    # of CoD's own data, which is not consistent about case.
+    primary_on_disk = resolve_file(weapon_root, primary_weapon_file)
+    if primary_on_disk is None:
+        raise FileNotFoundError(weapon_root / primary_weapon_file)
+    primary_path = weapon_root / primary_on_disk
     primary = parse_weapon_file(primary_path)
 
     variants: list[tuple[str, str, dict[str, str]]] = [
@@ -73,12 +117,13 @@ def weapon_animation_metadata(
     ]
     alternate_name = _safe_variant_name(primary.get("altWeapon", ""))
     if alternate_name and alternate_name.casefold() != primary_weapon_file.casefold():
-        alternate_path = weapon_root / alternate_name
-        if not alternate_path.is_file():
+        alternate_on_disk = resolve_file(weapon_root, alternate_name)
+        if alternate_on_disk is None:
             raise FileNotFoundError(
                 f"{primary_weapon_file}: alternate WEAPONFILE missing: "
-                f"{alternate_path}"
+                f"{weapon_root / alternate_name}"
             )
+        alternate_path = weapon_root / alternate_on_disk
         variants.append(
             ("alternate", alternate_name, parse_weapon_file(alternate_path))
         )
@@ -91,11 +136,15 @@ def weapon_animation_metadata(
             animation = values.get(field, "").strip()
             if not animation:
                 continue
-            if not (xanim_root / animation).is_file():
+            resolved = resolve_file(xanim_root, animation)
+            if resolved is None:
                 missing.append(
                     f"{weapon_file}:{field}={animation}"
                 )
                 continue
+            # Everything downstream treats this as a path under xanim/, so it
+            # has to be the name the filesystem will actually open.
+            animation = resolved
             if animation not in animations:
                 animations.append(animation)
             record = {
