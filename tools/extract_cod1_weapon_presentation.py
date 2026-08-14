@@ -37,7 +37,10 @@ from cod1_archive_policy import (
     sha256_bytes,
 )
 from cod1_mp_gsc_content import analyze_multiplayer_gsc
-from cod1_script_exploder import build_effect_closure
+from cod1_script_exploder import (
+    ScriptExploderClosureError,
+    build_effect_closure,
+)
 from cod1_shipping_maps import selected_shipping_map_ids
 from extract_cod1_ordnance import (
     MAIN_EFX as ORDNANCE_MAIN_EFX,
@@ -145,6 +148,47 @@ PRESENTATION_BASE_FILES = (
     "fx/muzzleflashes/russian_mg_viewmp.efx",
     "fx/muzzleflashes/thompson_viewmp.efx",
 )
+
+# The mounted-emplacement muzzle flashes. maps/<game>/<mapId>/entities.json
+# names these through turretViewFlashEffect/turretWorldFlashEffect — the
+# emplacement WEAPONFILEs are resolved per map tier by the map importer, so
+# the base maps reference Main's mg42hv pair while mp_arnhem references UO's
+# mf_mg42 pair. Neither weapon file sits in the staged weapons/mp tree (the
+# emplacement is a map entity, not an inventory weapon), so the field walk
+# below cannot discover them; pin the exact four the shipping maps use.
+MOUNTED_TURRET_FLASH_EFX = (
+    "fx/muzzleflashes/mg42hv_view.efx",
+    "fx/muzzleflashes/mg42hv.efx",
+    "fx/weapon/muzzleflash/mf_mg42_turret_v.efx",
+    "fx/weapon/muzzleflash/mf_mg42.efx",
+)
+
+# WEAPONFILE fields that name a .efx presentation asset. First- and
+# third-person muzzle flashes, the shell ejects, and the (retail-unused in
+# MP, always blank) last-shot eject — kept in the walk so a data patch that
+# starts authoring it is picked up without a code change.
+WEAPON_EFFECT_FIELDS = (
+    "viewFlashEffect",
+    "worldFlashEffect",
+    "shellEjectEffect",
+    "lastShotEjectEffect",
+)
+
+
+def effect_member_path(value: str) -> str:
+    """Archive member path for a WEAPONFILE .efx reference.
+
+    CoD's own data is not consistent about how it spells these: three UO
+    worldFlashEffect values carry a doubled extension
+    (``fx/weapon/muzzleflash/mf_kar98.efx.efx``) while the member on disk is
+    ``mf_kar98.efx`` — the engine strips and re-appends the extension, so
+    retail never noticed. Fold the duplication here so the lookup and the
+    flattened package basename both land on the real member.
+    """
+    normalized = value.replace("\\", "/").strip()
+    while normalized.casefold().endswith(".efx.efx"):
+        normalized = normalized[: -len(".efx")]
+    return normalized
 
 
 def weapon_values(path: Path) -> dict[str, str]:
@@ -392,6 +436,7 @@ def main() -> None:
         )
         required_aliases.update(effect.sound_aliases)
     required_presentation = set(PRESENTATION_BASE_FILES)
+    required_presentation.update(MOUNTED_TURRET_FLASH_EFX)
     for weapon_file in (source_root / "weapons/mp").iterdir():
         if not weapon_file.is_file():
             continue
@@ -400,10 +445,10 @@ def main() -> None:
             alias = values.get(field, "").strip().lower()
             if alias:
                 required_aliases.add(alias)
-        for field in ("viewFlashEffect", "shellEjectEffect"):
+        for field in WEAPON_EFFECT_FIELDS:
             effect = values.get(field, "").strip()
             if effect and effect.lower() != "none":
-                required_presentation.add(effect)
+                required_presentation.add(effect_member_path(effect))
 
     audio_prefix = "audio" if pak_root else "Audio"
     extracted_audio: set[str] = set()
@@ -474,32 +519,93 @@ def main() -> None:
     else:
         source_fx_output = output_root / "SourceFx"
         texture_output = output_root / "Textures"
+
+    def is_texture_member(path: str) -> bool:
+        return path.lower().endswith((".tga", ".dds", ".jpg", ".jpeg", ".png"))
+
+    # Every requested efx expands to its complete closure: the UO muzzle
+    # flashes open with a playfx call into a shared _global_* effect that
+    # carries the muzzle light, and their shaders name sprites the package
+    # must ship. A directly-named-files-only extraction shipped mf_bar_v.efx
+    # without _global_r_v.efx and without a single one of its sprites.
+    required_efx: dict[str, str] = {}
+    required_textures: dict[str, str] = {}
+    for requested in required_presentation:
+        target = (
+            required_textures
+            if is_texture_member(requested)
+            else required_efx
+        )
+        target.setdefault(requested.casefold(), requested)
+    for source_efx in sorted(required_efx.values(), key=str.casefold):
+        try:
+            effect = build_effect_closure(
+                mp_index,
+                "presentation",
+                source_efx,
+            )
+        except ScriptExploderClosureError as error:
+            # The root file (when present) still ships verbatim below; only
+            # the nested/sprite expansion is unavailable.
+            print(f"WARNING presentation efx closure unresolved: {error}")
+            continue
+        for nested in effect.efx_files:
+            required_efx.setdefault(nested.casefold(), nested)
+        for image in effect.image_files:
+            required_textures.setdefault(image.casefold(), image)
+
     extracted_presentation = []
-    for requested in sorted(required_presentation):
-        source = members.get(requested.lower())
+    # The package flattens retail paths onto basenames while the engine's
+    # namespace is the full path. Letting the last writer win would silently
+    # ship the wrong effect, so a flatten collision with different content is
+    # fatal; an identical-bytes duplicate is extracted once.
+    flattened_sources: dict[str, tuple[str, str]] = {}
+
+    def extract_presentation_member(requested: str, is_texture: bool) -> None:
+        source = members.get(requested.casefold())
         if source is None:
             print(f"WARNING missing presentation asset: {requested}")
-            continue
+            return
         archive_path, member = source
-        is_texture = requested.lower().endswith((".tga", ".dds", ".jpg", ".jpeg", ".png"))
         destination_root = texture_output if is_texture else source_fx_output
         with zipfile.ZipFile(archive_path) as archive:
             data = archive.read(member)
         if pak_root and is_texture:
             destination = destination_root / (Path(requested).stem + ".png")
-            convert_to_png(data, destination)
         else:
             destination = destination_root / Path(requested).name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-        relative = destination.relative_to(output_root).as_posix()
-        provenance[relative] = {
-            "archive": archive_relative_path(archive_path),
-            "member": member,
-            "bytes": len(data),
-            "sha256": sha256_bytes(data),
-        }
+        destination_key = str(destination).casefold()
+        digest = sha256_bytes(data)
+        claimed = flattened_sources.get(destination_key)
+        if claimed is not None:
+            claimed_source, claimed_digest = claimed
+            if claimed_digest != digest:
+                raise RuntimeError(
+                    f"presentation basename collision: {requested} and "
+                    f"{claimed_source} both flatten to {destination.name} "
+                    "with different content"
+                )
+        else:
+            flattened_sources[destination_key] = (requested, digest)
+            if pak_root and is_texture:
+                convert_to_png(data, destination)
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(data)
+            relative = destination.relative_to(output_root).as_posix()
+            provenance[relative] = {
+                "archive": archive_relative_path(archive_path),
+                "member": member,
+                "bytes": len(data),
+                "sha256": digest,
+            }
         extracted_presentation.append(requested)
+
+    for requested in sorted(required_textures.values(), key=str.casefold):
+        extract_presentation_member(requested, True)
+    for requested in sorted(required_efx.values(), key=str.casefold):
+        extract_presentation_member(requested, False)
+    extracted_presentation.sort(key=str.casefold)
 
     output_root.mkdir(parents=True, exist_ok=True)
     manifest = {

@@ -64,6 +64,16 @@ from cod1_multiplayer_closure import (  # noqa: E402
     UO_WEAPON_FILES,
     is_managed_source_path,
 )
+from cod1_impact_table import (  # noqa: E402
+    BULLET_CLOSURE_IMPACT_TYPES,
+    IMPACTS_FORMAT,
+    IMPACTS_VERSION,
+)
+from cod1_script_exploder import (  # noqa: E402
+    ScriptExploderClosureError,
+    efx_shader_names,
+    resolve_shader_images,
+)
 from cod1_shipping_maps import (  # noqa: E402
     BASE_SHIPPING_MAP_IDS,
     UO_SHIPPING_MAP_IDS,
@@ -386,6 +396,12 @@ IMPACT_REFERENCE_EFX = (
     "default_hit", "small_plaster", "small_gravel", "small_glass",
     "woodhit_small", "snowhit_small", "metalhit_small",
 )
+
+# fx/shaders.json: shader-name -> packaged texture, for every shader named by
+# an efx under fx/efx/. Warn-only and additive — the runtime guessed texture
+# basenames before this manifest existed and still can.
+FX_SHADERS_FORMAT = "FriendsOfDuty.FxShaders"
+FX_SHADERS_VERSION = 1
 
 
 def load_json(path: Path) -> dict | None:
@@ -4818,6 +4834,17 @@ def validate(
             "fx/efx missing impact reference effects: "
             f"{', '.join(absent_efx)} (run the impacts step)")
 
+    # Weapon flash/eject presence + the fx shader manifest. Warn-only: both
+    # are additive presentation features, and a package from an older
+    # exporter without them still mounts (the runtime falls back to its
+    # basename guessing).
+    validate_weapon_effect_presence(content, warnings)
+    validate_fx_shader_manifest(content, warnings)
+    # The per-surface impact table + its bullet effect closure. Warn-only
+    # for the same reason: absent on older packages, and the runtime keeps
+    # its transcribed nine-bucket profiles as the fallback.
+    validate_impacts_manifest(content, warnings)
+
     clips_root = content / "audio" / "footsteps" / "clips"
     families = [
         family for family in clips_root.iterdir()
@@ -4933,6 +4960,314 @@ def source_summary(
             "Offensive. Re-run the exporter with both installed."
         )
     return "Official multiplayer source (detached install)", True
+
+
+def flattened_efx_name(reference: str) -> str:
+    """fx/efx basename for a WEAPONFILE/entities .efx reference.
+
+    Retail UO WEAPONFILEs spell three worldFlashEffect values with a doubled
+    extension (``mf_kar98.efx.efx``) while the archived member has one; the
+    engine strips and re-appends the extension, so fold the duplication —
+    and add the extension for references authored without one — before
+    flattening to the packaged basename.
+    """
+    name = PurePosixPath(reference.replace("\\", "/").strip()).name
+    while name.casefold().endswith(".efx.efx"):
+        name = name[: -len(".efx")]
+    if name and not name.casefold().endswith(".efx"):
+        name += ".efx"
+    return name
+
+
+def validate_weapon_effect_presence(
+    content: Path,
+    warnings: list[str],
+) -> None:
+    """Warn when a weapons.json definition names an efx that is not packaged.
+
+    The presentation step flattens every WEAPONFILE-referenced efx into
+    fx/efx/<basename>; a definition whose muzzle/world/shell effect has no
+    flattened file would leave the runtime with a name it cannot resolve.
+    """
+    efx_dir = content / "fx" / "efx"
+    packaged_efx_names = (
+        {entry.name.casefold() for entry in efx_dir.glob("*.efx")}
+        if efx_dir.is_dir()
+        else set()
+    )
+    weapons_manifest = load_json(content / "weapons" / "weapons.json") or {}
+    manifest_weapons = weapons_manifest.get("weapons", [])
+    if not isinstance(manifest_weapons, list):
+        return
+    for weapon in manifest_weapons:
+        if not isinstance(weapon, dict):
+            continue
+        definition = weapon.get("definition")
+        if not isinstance(definition, dict):
+            continue
+        for key in ("muzzle_effect", "world_muzzle_effect", "shell_effect"):
+            reference = str(definition.get(key, "") or "").strip()
+            if not reference or reference.lower() == "none":
+                continue
+            flattened = flattened_efx_name(reference).casefold()
+            if flattened not in packaged_efx_names:
+                warnings.append(
+                    f"weapon {weapon.get('id', '?')} {key} '{reference}' "
+                    "has no flattened fx/efx file (run the presentation "
+                    "step)"
+                )
+
+
+def validate_fx_shader_manifest(
+    content: Path,
+    warnings: list[str],
+) -> None:
+    """Warn when fx/shaders.json is absent, dangling, or incomplete."""
+    efx_dir = content / "fx" / "efx"
+    shaders_manifest = load_json(content / "fx" / "shaders.json")
+    if shaders_manifest is None:
+        warnings.append(
+            "fx/shaders.json missing/unparseable (run the package step "
+            "with --game-root to regenerate it)"
+        )
+        return
+    if (
+        shaders_manifest.get("format") != FX_SHADERS_FORMAT
+        or shaders_manifest.get("version") != FX_SHADERS_VERSION
+    ):
+        warnings.append("fx/shaders.json format/version is unsupported")
+    shader_entries = shaders_manifest.get("shaders", [])
+    if not isinstance(shader_entries, list):
+        shader_entries = []
+        warnings.append("fx/shaders.json shaders member is not an array")
+    mapped_shaders: set[str] = set()
+    for entry in shader_entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("shader"), str)
+            or not entry.get("shader")
+            or not isinstance(entry.get("texture"), str)
+        ):
+            warnings.append("fx/shaders.json contains a malformed entry")
+            continue
+        mapped_shaders.add(entry["shader"].casefold())
+        texture_errors: list[str] = []
+        texture_path = content_path(
+            content,
+            entry["texture"],
+            f"fx shader '{entry['shader']}' texture",
+            texture_errors,
+        )
+        if (
+            texture_errors
+            or texture_path is None
+            or not texture_path.is_file()
+        ):
+            warnings.append(
+                f"fx shader '{entry['shader']}' references missing "
+                f"texture '{entry['texture']}'"
+            )
+    referenced_shaders: dict[str, str] = {}
+    if efx_dir.is_dir():
+        for efx_path in sorted(efx_dir.glob("*.efx")):
+            try:
+                text = efx_path.read_text(encoding="latin1", errors="replace")
+            except OSError:
+                continue
+            try:
+                names = efx_shader_names(text)
+            except ScriptExploderClosureError as error:
+                warnings.append(
+                    f"fx/efx/{efx_path.name} shader block is "
+                    f"malformed: {error}"
+                )
+                continue
+            for shader in names:
+                referenced_shaders.setdefault(shader.casefold(), shader)
+    absent_shaders = sorted(set(referenced_shaders) - mapped_shaders)
+    if absent_shaders:
+        preview = ", ".join(
+            referenced_shaders[key] for key in absent_shaders[:6]
+        ) + (", ..." if len(absent_shaders) > 6 else "")
+        warnings.append(
+            f"fx/shaders.json lacks mappings for {len(absent_shaders)} "
+            f"shader(s) referenced by fx/efx: {preview}"
+        )
+
+
+def validate_impacts_manifest(
+    content: Path,
+    warnings: list[str],
+) -> None:
+    """Warn when fx/impacts.json is absent/malformed, when a bullet-closure
+    row names an efx with no packaged fx/efx file, or when a materials.json
+    ``surface`` token is outside the table's surface vocabulary.
+
+    The bullet check covers exactly the BULLET_CLOSURE_IMPACT_TYPES rows the
+    impacts step ships closures for; the UO gmi per-class rows
+    (bullet_rifle_* and friends) are table data the runtime does not present,
+    so their efx are deliberately not packaged and must not warn.
+    """
+    manifest = load_json(content / "fx" / "impacts.json")
+    if manifest is None:
+        warnings.append(
+            "fx/impacts.json missing/unparseable (run the impacts step)"
+        )
+        return
+    if (
+        manifest.get("format") != IMPACTS_FORMAT
+        or manifest.get("version") != IMPACTS_VERSION
+    ):
+        warnings.append("fx/impacts.json format/version is unsupported")
+    rows = manifest.get("rows", [])
+    if not isinstance(rows, list) or not rows:
+        warnings.append("fx/impacts.json contains no rows")
+        rows = []
+    efx_dir = content / "fx" / "efx"
+    packaged_efx_names = (
+        {entry.name.casefold() for entry in efx_dir.glob("*.efx")}
+        if efx_dir.is_dir()
+        else set()
+    )
+    vocabulary: set[str] = set()
+    absent_efx: dict[str, str] = {}
+    malformed = False
+    for row in rows:
+        if (
+            not isinstance(row, dict)
+            or not isinstance(row.get("impact"), str)
+            or not row.get("impact")
+            or not isinstance(row.get("surface"), str)
+            or not row.get("surface")
+            or not isinstance(row.get("efx"), str)
+        ):
+            malformed = True
+            continue
+        if row["surface"] != "default":
+            vocabulary.add(row["surface"])
+        efx = row["efx"]
+        if row["impact"] in BULLET_CLOSURE_IMPACT_TYPES and efx:
+            flattened = flattened_efx_name(efx)
+            if flattened.casefold() not in packaged_efx_names:
+                absent_efx.setdefault(flattened.casefold(), efx)
+    if malformed:
+        warnings.append("fx/impacts.json contains a malformed row")
+    if absent_efx:
+        references = sorted(absent_efx.values(), key=str.casefold)
+        preview = ", ".join(references[:6]) + (
+            ", ..." if len(references) > 6 else ""
+        )
+        warnings.append(
+            f"fx/efx missing {len(references)} bullet impact effect(s) "
+            f"named by fx/impacts.json: {preview} (run the impacts step)"
+        )
+    unknown_surfaces: dict[str, str] = {}
+    maps_root = content / "maps"
+    if maps_root.is_dir():
+        for materials_path in sorted(maps_root.glob("*/*/materials.json")):
+            materials = load_json(materials_path)
+            if not isinstance(materials, list):
+                continue
+            for material in materials:
+                if not isinstance(material, dict):
+                    continue
+                surface = material.get("surface")
+                if not isinstance(surface, str) or not surface:
+                    continue
+                if surface not in vocabulary:
+                    unknown_surfaces.setdefault(
+                        surface,
+                        materials_path.relative_to(content).as_posix(),
+                    )
+    if unknown_surfaces:
+        details = ", ".join(
+            f"'{token}' ({unknown_surfaces[token]})"
+            for token in sorted(unknown_surfaces)[:6]
+        ) + (", ..." if len(unknown_surfaces) > 6 else "")
+        warnings.append(
+            f"materials.json declares {len(unknown_surfaces)} surface "
+            f"token(s) outside the impact table vocabulary: {details}"
+        )
+
+
+def write_fx_shader_manifest(content: Path, game_root: Path) -> None:
+    """Emit fx/shaders.json: every fx shader name referenced by an efx under
+    fx/efx/, mapped to its packaged fx/textures PNG.
+
+    Written at package time because this is the first point where every step
+    that ships into fx/efx (presentation, impacts, ordnance) has run, so the
+    manifest covers the whole directory rather than one owner's slice. The
+    shader names come from the shipped efx text; the shader->image hop
+    resolves through the retail archives exactly the way the exploder
+    closure does (declared *.shader stanzas first, then the engine's
+    same-named-texture fallback that serves the ``*_sn`` muzzle-flash
+    names). A shader whose resolved texture is not packaged is omitted — an
+    entry's texture must exist — and reported so the owning step can be
+    extended.
+    """
+    efx_dir = content / "fx" / "efx"
+    if not efx_dir.is_dir():
+        return
+    index = LayeredArchiveIndex(selected_archives(game_root))
+    texture_names: dict[str, str] = {}
+    textures_dir = content / "fx" / "textures"
+    if textures_dir.is_dir():
+        for entry in sorted(textures_dir.glob("*.png")):
+            texture_names.setdefault(entry.stem.casefold(), entry.name)
+    shaders: dict[str, str] = {}
+    for efx_path in sorted(
+        efx_dir.glob("*.efx"),
+        key=lambda path: path.name.casefold(),
+    ):
+        text = efx_path.read_text(encoding="latin1", errors="replace")
+        try:
+            names = efx_shader_names(text)
+        except ScriptExploderClosureError as error:
+            print(
+                f"WARNING fx/efx/{efx_path.name} shader block is "
+                f"malformed: {error}"
+            )
+            continue
+        for shader in names:
+            shaders.setdefault(shader.casefold(), shader)
+    entries: list[dict[str, str]] = []
+    omitted: list[str] = []
+    for key in sorted(shaders):
+        shader = shaders[key]
+        try:
+            images = resolve_shader_images(index, shader)
+        except ScriptExploderClosureError:
+            omitted.append(shader)
+            continue
+        # Animated materials list one image per frame; the manifest maps the
+        # material to its first frame, which is also what the flattened
+        # textures directory serves a basename-guessing consumer.
+        texture = texture_names.get(PurePosixPath(images[0]).stem.casefold())
+        if texture is None:
+            omitted.append(shader)
+            continue
+        entries.append(
+            {"shader": shader, "texture": f"fx/textures/{texture}"}
+        )
+    payload = {
+        "format": FX_SHADERS_FORMAT,
+        "version": FX_SHADERS_VERSION,
+        "shaders": entries,
+    }
+    (content / "fx" / "shaders.json").write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    print(
+        f"fx/shaders.json written: {len(entries)} shader mapping(s)"
+        + (f", {len(omitted)} omitted" if omitted else "")
+    )
+    if omitted:
+        preview = ", ".join(omitted[:6]) + (
+            ", ..." if len(omitted) > 6 else ""
+        )
+        print(
+            f"WARNING fx/shaders.json omits {len(omitted)} shader(s) whose "
+            f"textures are not packaged: {preview}"
+        )
 
 
 FACTIONS_FORMAT = "FriendsOfDuty.Factions"
@@ -5208,6 +5543,9 @@ def main() -> None:
             content / "provenance" / "source_archives.json",
             game_root,
         )
+        # Written before validation, like the policy manifest, so the same
+        # run that produced it also proves every mapped texture exists.
+        write_fx_shader_manifest(content, game_root)
 
     errors: list[str] = []
     warnings: list[str] = []

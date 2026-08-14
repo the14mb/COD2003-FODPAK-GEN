@@ -316,6 +316,37 @@ def texture_output_path(source: str) -> str:
     ).as_posix()
 
 
+def efx_shader_names(text: str) -> tuple[str, ...]:
+    """Shader names referenced by one EFX definition's ``shaders [ ... ]``
+    blocks, deduplicated case-insensitively, first spelling retained."""
+    names: dict[str, str] = {}
+    for shader in _block_values(text, "shaders"):
+        names.setdefault(shader.casefold(), _normal(shader))
+    return tuple(names[key] for key in sorted(names))
+
+
+def resolve_shader_images(index, shader: str) -> tuple[str, ...]:
+    """Source image member path(s) behind one fx shader name.
+
+    Declared shaders resolve through the layered ``*.shader`` scripts; a name
+    with no declaration is the engine's auto-generated material over the
+    same-named base texture (this is how the ``*_sn`` muzzle-flash shaders
+    reach ``muzflash2.tga`` — their declarations map the suffixed name back
+    to the base image). Raises ScriptExploderClosureError when no image
+    exists under any spelling."""
+    image_tokens = _shader_image_tokens(index, shader)
+    if not image_tokens:
+        image_tokens = (shader,)
+    resolved: list[str] = []
+    seen: set[str] = set()
+    for token in image_tokens:
+        image = _resolve_image(index, token)
+        if image.casefold() not in seen:
+            seen.add(image.casefold())
+            resolved.append(image)
+    return tuple(resolved)
+
+
 def build_effect_closure(
     index,
     fx_id: str,
@@ -372,18 +403,10 @@ def build_effect_closure(
     for shader in (
         shaders[key] for key in sorted(shaders)
     ):
-        image_tokens = _shader_image_tokens(index, shader)
-        if not image_tokens:
-            image_tokens = (shader,)
-        resolved_for_shader: list[str] = []
-        seen_for_shader: set[str] = set()
-        for token in image_tokens:
-            image = _resolve_image(index, token)
+        resolved_for_shader = resolve_shader_images(index, shader)
+        for image in resolved_for_shader:
             image_files.setdefault(image.casefold(), image)
-            if image.casefold() not in seen_for_shader:
-                seen_for_shader.add(image.casefold())
-                resolved_for_shader.append(image)
-        shader_images.append((shader, tuple(resolved_for_shader)))
+        shader_images.append((shader, resolved_for_shader))
 
     return ExploderEffectClosure(
         fx_id=fx_id.casefold(),

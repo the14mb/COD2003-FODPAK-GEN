@@ -16,6 +16,22 @@ shipped Assets/Resources extraction on 2026-07-25:
                                    decal shaders — and the polygonOffset2 entries
                                    in fxshaders/pj_fx.shader (stone_singleshot1,
                                    cratered*).
+  fx/impacts.json               <- fx/*.csv impact tables across the layered
+                                   archives (Main/pak5.pk3 fx/iw_impacts.csv,
+                                   uo/pakuo00.pk3 fx/gmi_impacts.csv +
+                                   fx/iw_impacts.csv), merged as retail does:
+                                   alphabetical filenames override per
+                                   (impact, surface) row, archive layering
+                                   merges same-named files (UO rows over
+                                   Main's). All rows ship; blank efx cells
+                                   stay "" (deliberate no-effect).
+  fx/efx/ + fx/textures/        <- the full effect closure of every efx the
+                                   merged bullet_small_*/bullet_large_* rows
+                                   name: nested .efx documents flattened to
+                                   basenames, every shader-resolved sprite as
+                                   <stem>.png (cod1_script_exploder
+                                   build_effect_closure, weapon-presentation
+                                   collision guard).
   fx/efx/<name>.efx             <- Main/pak5.pk3 fx/impacts/<name>.efx (verbatim)
                                    The small-arms impact effects, kept as
                                    reference because their `Decal { ... shaders [
@@ -58,11 +74,19 @@ from cod1_archive_policy import (
     UO_TIER,
     official_archives,
 )
+from cod1_impact_table import (
+    bullet_closure_efx_paths,
+    discover_impact_tables,
+    impacts_manifest_payload,
+    merge_impact_rows,
+)
 from cod1_multiplayer_closure import (
     bsp_entities,
     selected_multiplayer_maps,
 )
 from cod1_script_exploder import (
+    ScriptExploderClosureError,
+    build_effect_closure,
     efx_output_path as exploder_efx_output_path,
     map_exploder_effects,
     texture_output_path as exploder_texture_output_path,
@@ -505,6 +529,108 @@ def main() -> None:
         ) + "\n",
         encoding="utf-8",
     )
+
+    # Retail's per-surface impact table, merged exactly as the engine does
+    # (fx/*.csv, later filenames overriding earlier rows per (impact,
+    # surface), archive layering merging same-named files), shipped verbatim
+    # as fx/impacts.json — ALL rows, the runtime filters. The bullet_small/
+    # bullet_large rows' effects then ship as full closures: the .efx
+    # documents flattened into fx/efx/ and every sprite their shaders
+    # resolve to into fx/textures/, so the authored grass-tuft/brick-chip/
+    # metal-spark effects play from package data alone.
+    impact_tables = discover_impact_tables(index.archives)
+    impact_rows = merge_impact_rows(
+        rows for _name, _archive, rows in impact_tables
+    )
+    impacts_json = pak_root / "fx" / "impacts.json"
+    impacts_json.parent.mkdir(parents=True, exist_ok=True)
+    impacts_json.write_text(
+        json.dumps(impacts_manifest_payload(impact_rows), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    print(
+        f"fx/impacts.json written: {len(impact_rows)} row(s) merged from "
+        + ", ".join(
+            f"{archive.parent.name}/{archive.name}:fx/{name}"
+            for name, archive, _rows in impact_tables
+        )
+    )
+    if not impact_rows:
+        message = "impacts: no fx/*.csv impact table found in any archive"
+        print(f"WARNING {message}")
+        notes.append(message)
+
+    # The package flattens retail paths onto basenames while the engine's
+    # namespace is the full path — same guard as the weapon-presentation
+    # extractor: a flatten collision with different content is fatal, an
+    # identical-bytes duplicate ships once.
+    flattened_impact_sources: dict[str, tuple[str, str]] = {}
+
+    def write_flattened_closure_member(source: str, is_texture: bool) -> None:
+        nonlocal extracted, skipped
+        reference = exploder_index.get(source)
+        if reference is None:
+            message = f"impacts: closure member is missing: {source}"
+            print(f"WARNING {message}")
+            notes.append(message)
+            return
+        data = exploder_index.read_ref(reference)
+        destination = (
+            pak_root / "fx" / "textures" / (Path(source).stem + ".png")
+            if is_texture
+            else pak_root / "fx" / "efx" / Path(source).name
+        )
+        digest = hashlib.sha256(data).hexdigest()
+        claimed = flattened_impact_sources.get(str(destination).casefold())
+        if claimed is not None:
+            claimed_source, claimed_digest = claimed
+            if claimed_digest != digest:
+                raise RuntimeError(
+                    f"impact basename collision: {source} and "
+                    f"{claimed_source} both flatten to {destination.name} "
+                    "with different content"
+                )
+            return
+        flattened_impact_sources[str(destination).casefold()] = (
+            source,
+            digest,
+        )
+        if destination.is_file() and not args.force:
+            skipped += 1
+            return
+        if is_texture:
+            convert_to_png(data, destination)
+        else:
+            write_bytes(data, destination)
+        extracted += 1
+        relative = destination.relative_to(pak_root).as_posix()
+        print(
+            f"{relative} <- {reference.archive.parent.name}/"
+            f"{reference.archive.name}:{reference.name}"
+        )
+
+    closure_efx: dict[str, str] = {}
+    closure_images: dict[str, str] = {}
+    for source_efx in bullet_closure_efx_paths(impact_rows):
+        try:
+            effect = build_effect_closure(
+                exploder_index,
+                "impacts",
+                source_efx,
+            )
+        except ScriptExploderClosureError as error:
+            message = f"impacts: bullet impact closure unresolved: {error}"
+            print(f"WARNING {message}")
+            notes.append(message)
+            continue
+        for nested in effect.efx_files:
+            closure_efx.setdefault(nested.casefold(), nested)
+        for image in effect.image_files:
+            closure_images.setdefault(image.casefold(), image)
+    for source in (closure_images[key] for key in sorted(closure_images)):
+        write_flattened_closure_member(source, True)
+    for source in (closure_efx[key] for key in sorted(closure_efx)):
+        write_flattened_closure_member(source, False)
 
     for name in IMPACT_TEXTURES:
         destination = pak_root / "fx" / "textures" / f"{name}.png"

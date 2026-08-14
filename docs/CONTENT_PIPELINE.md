@@ -92,7 +92,7 @@ current/
                                    # Unity-XZ grid; triangle closure equals world.glb exactly
     <game>/<mapId>/entities.json   # same schema as today's <map>_entities.json
     <game>/<mapId>/materials.json  # material table: [{group, texture(rel), alphaCutout, decal,
-                                   # polygonOffset, sky, fallbackColor}]
+                                   # polygonOffset, sky, fallbackColor, surface?}]
                                    # polygonOffset:true = the pak shader stanza declared
                                    # 'polygonOffset', i.e. CoD1 drew this surface with a depth bias
                                    # because it is authored exactly coplanar with the one beneath
@@ -111,6 +111,17 @@ current/
                                    # decals_decal_cratered_ground, else .68; _Opacity .95; queue
                                    # Transparent-50). Absent field = false (JsonUtility default), so
                                    # older materials.json files stay loadable.
+                                   # surface (additive, lowercase): the impact surface type the
+                                   # material's .shader stanza declares with an explicit
+                                   # 'surfaceparm <token>' whose token is in the impact table's
+                                   # surface vocabulary (grass, brick, metal, foliage, ... — the
+                                   # words fx/impacts.json keys effects on; derived from the
+                                   # layered fx/*.csv tables, never hard-coded). Behaviour parms
+                                   # sharing the keyword (nomarks, trans, nolightmap, noimpact,
+                                   # playerclip, nonsolid, ...) never land here. Absent when the
+                                   # shader declares no surface token — the runtime's material
+                                   # name heuristics stay in charge for those, so older
+                                   # materials.json files keep working unchanged.
     <game>/<mapId>/lightmaps_lamps/page_<n>.png
                                    # lamps-only world lightmap pages (Lamp Lighting Rework stage 2,
                                    # Docs/LAMP_LIGHTING_REWORK_SPEC.md): an analytic,
@@ -151,6 +162,20 @@ current/
                                    #   cratered and sparkflash ship as two formats each and
                                    #   the .tga wins). Two roles, and they are NOT
                                    #   interchangeable — see §1.2.1.
+                                   # + the sprite closure of every muzzle-flash/shelleject efx
+                                   #   below: every image its shaders resolve to, flattened to
+                                   #   <stem>.png (UO's weapon_v/* and fire/smoke/misc DDS
+                                   #   sprites — muzzleflash_{f,s}_{a..d}, muzzleflash_fmg42,
+                                   #   muzzleflash_ppsh_{a..c}, glow_red_{a,b}, fire_ball_{a..c},
+                                   #   smk_p_fractal_wht_{a..c} — plus Main's mg42a/mg42b,
+                                   #   thompson/flip stages and dusty_puff)
+                                   # + the sprite closure of the bullet-impact efx (the effects
+                                   #   fx/impacts.json's bullet_small_*/bullet_large_* rows name):
+                                   #   mist/mist2, whitesmoke, riverspray1, watersheet1,
+                                   #   watering1, raindroplett, snowsheet1, stonegib1,
+                                   #   dirthit_large — the authored grass-tuft/brick-chip/
+                                   #   metal-spark/water-splash billboards beyond the gfx/impact
+                                   #   set above
     efx/*.efx                      # raw CoD effect definitions (reference): muzzle flashes,
                                    # shellejects + grenade1-3/_snow/_water, fireball2_gren,
                                    # smoke/emitter_panzerfaust, UO grenade/rocket/sg_* sets,
@@ -158,6 +183,62 @@ current/
                                    # small_brick, small_concrete, small_rock, small_gravel,
                                    # small_gravel2, small_glass, small_grass, small_foliage,
                                    # woodhit_small, snowhit_small, metalhit_small, flesh_hit)
+                                   # Muzzle flashes cover BOTH persons and the mounted MG42s:
+                                   # every WEAPONFILE viewFlashEffect/worldFlashEffect/
+                                   # shellEjectEffect/lastShotEjectEffect (UO's layered
+                                   # weapons/mp overrides win, so the hand weapons resolve to
+                                   # fx/weapon/muzzleflash/mf_<weapon>[_v].efx) plus the four
+                                   # emplacement flashes entities.json names
+                                   # (Main mg42hv/mg42hv_view, UO mf_mg42/mf_mg42_turret_v),
+                                   # each expanded through its full nested playFx closure —
+                                   # the UO flashes call shared _global_{r,p,smg,lmg,hmg}[_v]
+                                   # effects that carry the muzzle light. Paths flatten to
+                                   # basenames; the extractor fails on a basename collision
+                                   # with differing content. Retail UO spells three
+                                   # worldFlashEffect values with a doubled extension
+                                   # (mf_kar98.efx.efx, mf_gewehr43.efx.efx,
+                                   # mf_svt40.efx.efx); the packaged file and the flattened
+                                   # lookup both fold that to the single-.efx member, while
+                                   # weapons.json keeps the WEAPONFILE's verbatim spelling.
+                                   # Bullet impacts ship as full closures too: every efx a
+                                   # bullet_small_*/bullet_large_* row of fx/impacts.json names,
+                                   # plus their nested playFx dependencies (brickimpact_em/_em2,
+                                   # gravelimpact_em/_em2, impact_em, rocksplashes, leafs) —
+                                   # the large_* family, metalhit_large, snowhit_large and
+                                   # waterhit_small/large joined the small-arms set this way.
+    impacts.json                   # {"format":"FriendsOfDuty.Impacts","version":1,
+                                   #  "rows":[{"impact":"bullet_small_normal","surface":"dirt",
+                                   #           "efx":"fx/impacts/small_gravel2.efx"}, ...]}
+                                   # Retail's impact-type × surface → effect table, merged as the
+                                   # engine does: every CSV directly under fx/ across the layered
+                                   # archives whose rows match the 3-column shape (Main/pak5
+                                   # iw_impacts.csv; UO's gmi_impacts.csv plus its own
+                                   # iw_impacts.csv copy), alphabetical filenames overriding
+                                   # earlier rows per (impact, surface), same-named files merging
+                                   # in archive load order so UO's grenade/molotov/rocket rows
+                                   # override Main's while Main's bullet_small_*/bullet_large_*
+                                   # rows survive (UO's copy dropped them for the gmi per-class
+                                   # types). ALL rows ship — grenade/rocket/gmi types too, the
+                                   # runtime filters — impact and surface lowercased, efx paths
+                                   # forward-slashed, deliberately blank efx cells kept as ""
+                                   # (they mean "play no effect"). The efx of the four
+                                   # bullet_small_*/bullet_large_* types resolve by BASENAME in
+                                   # fx/efx/ (see above); the other rows are data only.
+                                   # Additive + warn-only (§1.3.1): no gameContentVersion bump.
+    shaders.json                   # {"format":"FriendsOfDuty.FxShaders","version":1,
+                                   #  "shaders":[{"shader":"gfx/effects/muzflash2_sn",
+                                   #              "texture":"fx/textures/muzflash2.png"}, ...]}
+                                   # Every fx shader name referenced by every efx/*.efx above,
+                                   # mapped to its packaged texture, so the runtime stops
+                                   # guessing basenames. Resolution mirrors the engine: the
+                                   # layered *.shader declarations first (this is how the
+                                   # *_sn view-flash names reach their base image), then the
+                                   # same-named-texture fallback; animated materials map to
+                                   # their first frame. Written by the package step (the one
+                                   # point after every fx/efx owner — presentation, impacts,
+                                   # ordnance — has run); a shader whose resolved texture is
+                                   # not packaged is omitted and reported. Additive + warn-only
+                                   # (§1.3.1): no gameContentVersion bump.
   ui/
     reticle_q.png                  # scope quarter-mask
     hud/                           # in-game HUD art; sources matched by basename
@@ -234,6 +315,14 @@ picked at random per impact, plus `bullethole1`/`bullethole2` mixed into every h
 surface because that is exactly what `default_hit` does for geometry the original
 did not classify — and our runtime buckets nine surface types where CoD had dozens.
 Flesh, Foliage and Water place no mark, matching their empty efx.
+
+**Which efx plays on which surface** is no longer transcribed at all: retail's own
+impact table ships parsed as `fx/impacts.json` (§1.2), each map's `materials.json`
+carries the shader-declared `surface` token, and the four `bullet_small_*` /
+`bullet_large_*` types' effects ship as complete closures under `fx/efx/` +
+`fx/textures/`, so the runtime can look up surface → efx → sprites entirely from
+package data. The nine-bucket profiles above remain the fallback for packages that
+predate the manifest and for materials whose shader declared no surface token.
 
 ### 1.2.2 `tag_*` attachment nodes in `weapons/worldmodels/<world>/world.glb`
 
@@ -354,7 +443,12 @@ rgd33, stielhandgranate, and smokegrenade when UO is present):
      bolt_action, segmented_reload, reload_ammo_add, reload_start_add, ads, ads_fov,
      ads_in, ads_out, pickup_sound, fire_sound, last_shot_sound, rechamber_sound,
      reload_sound, reload_empty_sound, reload_start_sound, reload_end_sound,
-     muzzle_effect, shell_effect,
+     muzzle_effect, world_muzzle_effect, shell_effect,
+     ...world_muzzle_effect is the WEAPONFILE worldFlashEffect verbatim (the third-person
+     flash; additive, absent in older packages). Like muzzle_effect it names a retail efx
+     path whose BASENAME is the packaged fx/efx file — fold a retail ".efx.efx" doubled
+     extension (kar98k/gewehr43/svt40) to ".efx" when resolving, exactly as the exporter's
+     flattening does. fx/shaders.json (§1.2) maps each efx's shader names to textures.
      ...plus OPTIONAL ordnance fields, emitted only when the WEAPONFILE carries a
      meaningful value (C# mirrors default them when absent):
      weapon_class ("rifle"|"pistol"|"mg"|"rocket"|"grenade"|"smoke"; default rifle,

@@ -57,6 +57,10 @@ from cod1_archive_policy import (
     UO_TIER,
     official_archives as policy_official_archives,
 )
+from cod1_impact_table import (
+    parse_impact_table,
+    surface_vocabulary as impact_table_surface_vocabulary,
+)
 from cod1_multiplayer_closure import HEALTH_PICKUP_MODEL
 from cod1_shipping_maps import (
     ALL_SHIPPING_MAP_IDS,
@@ -105,7 +109,7 @@ LIGHT_LUMP_INDEX = 30
 LIGHT_LUMP_STRIDE = 72
 DIRECTIONAL_LIGHT_TYPE = 1
 SUPPORTED_VERSION = 59
-MAP_PIPELINE_VERSION = 19
+MAP_PIPELINE_VERSION = 20
 MAP_OPTIMIZATION_FORMAT = "FriendsOfDuty.MapOptimization"
 MAP_OPTIMIZATION_VERSION = 2
 RENDER_SECTOR_SIZE_METRES = 32.0
@@ -1946,6 +1950,84 @@ def alpha_tested_materials(
     return result
 
 
+def impact_surface_vocabulary(
+    asset_index: dict[str, ArchiveEntry],
+) -> frozenset[str]:
+    """Surface tokens the layered impact tables (``fx/*.csv``) speak.
+
+    Derived from the same archives the map is built from rather than
+    hard-coded, so the ``surface`` harvest below can never invent a token
+    retail's fx/iw_impacts.csv (and UO's gmi_impacts.csv) cannot key an
+    effect on. The union across tables is the vocabulary; the per-row
+    override merge is irrelevant here because overriding a row never
+    changes which surface columns exist.
+    """
+    tokens: set[str] = set()
+    for key, entry in asset_index.items():
+        if not key.startswith("fx/") or not key.endswith(".csv"):
+            continue
+        if "/" in key[len("fx/"):]:
+            continue
+        rows = parse_impact_table(
+            read_entry(entry).decode("latin1", "replace")
+        )
+        if rows is not None:
+            tokens |= impact_table_surface_vocabulary(rows)
+    return frozenset(tokens)
+
+
+def surfaceparm_materials(
+    asset_index: dict[str, ArchiveEntry],
+    vocabulary: frozenset[str],
+) -> dict[str, str]:
+    """Impact surface type each pak shader stanza declares, keyed by
+    material path: the ``surfaceparm <token>`` whose token is one of the
+    impact table's surface words (grass, brick, metal, ...).
+
+    This is what retail keys the per-surface bullet impact effects on, and
+    materials.json carries it as an additive ``surface`` field. Only an
+    explicit surface-vocabulary token qualifies — the many non-surface
+    parms (nomarks, trans, nolightmap, noimpact, playerclip, nonsolid, ...)
+    share the keyword but describe behaviour, not material, and must never
+    land in the field. When a stanza declares several vocabulary tokens the
+    last one wins, matching the engine's parm-by-parm application order.
+    Same column-zero/brace-depth stanza walker as polygon_offset_materials.
+    """
+    result: dict[str, str] = {}
+    for key, entry in asset_index.items():
+        if not key.endswith(".shader"):
+            continue
+        text = read_entry(entry).decode("latin1", "replace")
+        name: str | None = None
+        depth = 0
+        surface: str | None = None
+        for line in text.splitlines():
+            stripped = line.split("//", 1)[0].strip()
+            if not stripped:
+                continue
+            if depth == 0:
+                if stripped == "{":
+                    depth = 1
+                    surface = None
+                elif not stripped.startswith("}"):
+                    name = stripped
+                continue
+            fields = stripped.casefold().split()
+            if (
+                len(fields) >= 2
+                and fields[0] == "surfaceparm"
+                and fields[1] in vocabulary
+            ):
+                surface = fields[1]
+            depth += stripped.count("{") - stripped.count("}")
+            if depth <= 0:
+                if name and surface:
+                    result[normalized_material_path(name)] = surface
+                depth = 0
+                name = None
+    return result
+
+
 def decal_material(material: str) -> bool:
     """A decal surface: renders blended on top of the wall/ground it is
     stuck to instead of as its own opaque brush face.
@@ -2698,6 +2780,10 @@ def extract_world_pak(
     offset_materials = polygon_offset_materials(asset_index)
     shader_images = shader_diffuse_images(asset_index)
     texture_alpha_tested = alpha_tested_materials(asset_index)
+    material_surfaces = surfaceparm_materials(
+        asset_index,
+        impact_surface_vocabulary(asset_index),
+    )
     biased_materials = 0
     for material_index in all_render_materials:
         source_name = material_names[material_index]
@@ -2747,27 +2833,34 @@ def extract_world_pak(
         )
         if polygon_offset:
             biased_materials += 1
-        material_manifest.append(
-            {
-                "source": source_name,
-                "group": group_name,
-                "texture": texture_relative,
-                "textureSource": texture_source,
-                "alphaCutout": (
-                    alpha_material(source_name)
-                    or normalized_material_path(source_name)
-                    in texture_alpha_tested
-                ),
-                "decal": is_decal,
-                "polygonOffset": polygon_offset,
-                "sky": sky_material(source_name),
-                "fallbackColor": (
-                    decal_tint(group_name, rebuilt)
-                    if is_decal
-                    else fallback_color(source_name)
-                ),
-            }
+        material_entry = {
+            "source": source_name,
+            "group": group_name,
+            "texture": texture_relative,
+            "textureSource": texture_source,
+            "alphaCutout": (
+                alpha_material(source_name)
+                or normalized_material_path(source_name)
+                in texture_alpha_tested
+            ),
+            "decal": is_decal,
+            "polygonOffset": polygon_offset,
+            "sky": sky_material(source_name),
+            "fallbackColor": (
+                decal_tint(group_name, rebuilt)
+                if is_decal
+                else fallback_color(source_name)
+            ),
+        }
+        # Additive: present only when the shader stanza declared an explicit
+        # impact-vocabulary surfaceparm; the runtime's name heuristics stay
+        # in charge for every other material.
+        surface = material_surfaces.get(
+            normalized_material_path(source_name)
         )
+        if surface:
+            material_entry["surface"] = surface
+        material_manifest.append(material_entry)
 
     # ``textures/common/ladder*`` brushes do not have draw-soup faces and
     # therefore cannot appear in the loop above.  Add one collision-only
@@ -3897,6 +3990,12 @@ def source_fingerprint(
     script: str | None,
 ) -> str:
     digest = hashlib.sha256()
+    # v20: materials.json entries gain an additive "surface" field — the
+    # impact-vocabulary surfaceparm token the material's shader stanza
+    # declares (grass, brick, metal, ...), the key retail's fx/iw_impacts.csv
+    # maps bullet impact effects on. Unchanged BSPs must regenerate
+    # materials.json to carry it; the field is absent when no stanza
+    # declares one, so nothing else changes.
     # v19: clip.glb ships one primitive PER BRUSH instead of per clip
     # material, so the runtime can cook each playerclip brush as a CONVEX
     # collider. The merged triangle-soup groups let the capsule controller
@@ -5928,6 +6027,14 @@ def run_pak_mode(args: argparse.Namespace) -> None:
                             [],
                         ),
                         "fallbackColor": item["fallbackColor"],
+                        # Additive impact surface type; only present when
+                        # the source shader declared one (JsonUtility
+                        # defaults it to "" when absent).
+                        **(
+                            {"surface": item["surface"]}
+                            if item.get("surface")
+                            else {}
+                        ),
                     }
                     for item in world["materialManifest"]
                 ],

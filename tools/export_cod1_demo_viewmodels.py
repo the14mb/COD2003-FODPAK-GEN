@@ -247,6 +247,11 @@ def make_weapon(entry) -> dict:
         "reload_start_sound": values.get("reloadStartSound", ""),
         "reload_end_sound": values.get("reloadEndSound", ""),
         "muzzle_effect": values.get("viewFlashEffect", ""),
+        # The third-person flash, verbatim like muzzle_effect. Three UO
+        # WEAPONFILEs spell it with a doubled extension (mf_kar98.efx.efx);
+        # the presentation extractor folds that when flattening into fx/efx,
+        # and consumers resolve by basename the same way.
+        "world_muzzle_effect": values.get("worldFlashEffect", ""),
         "shell_effect": values.get("shellEjectEffect", ""),
         "ordnance": ordnance_fields(values, weapon_class),
     }
@@ -265,7 +270,7 @@ DEFINITION_KEYS = (
     "pickup_sound", "fire_sound", "last_shot_sound",
     "rechamber_sound", "reload_sound", "reload_empty_sound",
     "reload_start_sound", "reload_end_sound", "muzzle_effect",
-    "shell_effect",
+    "world_muzzle_effect", "shell_effect",
 )
 
 

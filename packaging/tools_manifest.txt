@@ -7,6 +7,7 @@
 batch_export_cod1_models.py
 build_pavlov_sky_panorama.py
 cod1_archive_policy.py
+cod1_impact_table.py
 cod1_mp_gsc_content.py
 cod1_multiplayer_closure.py
 cod1_playeranim.py

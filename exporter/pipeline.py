@@ -1271,9 +1271,11 @@ def build_steps(cfg: PipelineConfig) -> list[Step]:
                     content / "fx" / "textures" /
                     "dirtplume_model2.png"
                 ).is_file()
+                and (content / "fx" / "impacts.json").is_file()
                 and _exploders_done(c)),
             signature_files=(
                 TOOLS_DIR / "extract_cod1_impacts.py",
+                TOOLS_DIR / "cod1_impact_table.py",
                 TOOLS_DIR / "cod1_script_exploder.py",
                 TOOLS_DIR / "cod1_archive_policy.py",
                 TOOLS_DIR / "cod1_shipping_maps.py",
@@ -1380,6 +1382,7 @@ def build_steps(cfg: PipelineConfig) -> list[Step]:
             is_done=_maps_done,
             signature_files=(
                 TOOLS_DIR / "import_cod_multiplayer_maps.py",
+                TOOLS_DIR / "cod1_impact_table.py",
                 TOOLS_DIR / "cod1_script_exploder.py",
                 TOOLS_DIR / "cod1_archive_policy.py",
                 TOOLS_DIR / "cod1_shipping_maps.py",
