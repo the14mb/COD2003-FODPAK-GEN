@@ -256,6 +256,29 @@ def _windows_drive_candidates() -> list[Path]:
     return found
 
 
+def _main_directory(path: Path) -> Path | None:
+    """`Main/` however this install happened to spell it.
+
+    Case-insensitively, because cod1_archive_policy._tier_directory already
+    resolves the same directory that way and the two must agree. They did not:
+    an exact-case lookup here skipped installs the policy would then happily
+    accept, so on a case-sensitive filesystem -- every Linux box, so every
+    Steam Deck -- a `main/` install was never detected and the player was sent
+    to a folder picker. In Gaming Mode a folder picker is barely usable with a
+    controller, which is the exact outcome this module exists to avoid.
+    """
+    exact = path / "Main"
+    if exact.is_dir():
+        return exact
+    try:
+        for child in sorted(path.iterdir()):
+            if child.is_dir() and child.name.casefold() == "main":
+                return child
+    except OSError:
+        return None
+    return None
+
+
 def looks_like_install(path: Path) -> bool:
     """Cheap structural test, no policy check.
 
@@ -264,8 +287,8 @@ def looks_like_install(path: Path) -> bool:
     in cod1_archive_policy and is applied by validate_game_dir; duplicating
     it here would mean two answers to the same question.
     """
-    main = path / "Main"
-    if not main.is_dir():
+    main = _main_directory(path)
+    if main is None:
         return False
     try:
         return any(main.glob("*.pk3"))

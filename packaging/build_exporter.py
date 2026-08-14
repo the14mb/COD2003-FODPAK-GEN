@@ -242,6 +242,10 @@ def host_target() -> str:
     return "linux-x64"
 
 
+def target_os(target: str) -> str:
+    return target.split("-", 1)[0]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -249,6 +253,22 @@ def main() -> int:
     parser.add_argument("--skip-selftest", action="store_true")
     arguments = parser.parse_args()
     target = arguments.target or host_target()
+
+    # --target selects the importer artifact and the Blender pin. It does NOT
+    # select the frozen shell: that always comes from the PyInstaller running
+    # here, because PyInstaller cannot cross-compile. Building windows-x64 on a
+    # Mac therefore produced a Mach-O binary carrying a Windows .pyd and a
+    # payload.json claiming windows-x64 -- a payload that cannot run anywhere.
+    # That exact class of mistake has shipped before: a Mach-O
+    # cod_asset_importer.abi3.so once went out in the SteamOS depot. Refuse.
+    host = host_target()
+    if target_os(target) != target_os(host):
+        raise SystemExit(
+            f"cannot build {target} on {host}: PyInstaller does not "
+            "cross-compile, and the frozen binary would be a "
+            f"{target_os(host)} executable labelled {target}.\n"
+            f"Build {target} on a {target_os(target)} machine."
+        )
     output = arguments.output.resolve()
     work = REPO / "Builds" / ".exporter-work"
 
