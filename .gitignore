@@ -21,6 +21,10 @@
 /out/
 /output/
 /dist/
+# build_exporter.py's PyInstaller scratch directory. Untracked it
+# makes every checkout look dirty, which matters because the
+# release scripts warn when a payload is built from uncommitted work.
+/Builds/
 
 # CI-built cod_asset_importer extensions, fetched with `make importer-fetch`.
 # Build outputs of github.com/anarqz/cod-asset-importer, reproducible from
