@@ -1351,7 +1351,17 @@ def parse_args() -> argparse.Namespace:
                         help="game executable for the 'Launch game' button")
     parser.add_argument("--game-callback", action="store_true",
                         help="passed by the game when it spawned the exporter")
-    args = parser.parse_args()
+    # parse_known_args, not parse_args: Steam appends the player's per-game
+    # Launch Options to every launch option's command line, and those belong to
+    # the player, not to us. A Deck with `gamemoderun %command%` or a stray
+    # character in that box made this exit instantly with an argparse usage
+    # message the player never saw -- the window simply never appeared. Unity
+    # ignores unknown argv and the game was unaffected, which is exactly why
+    # this was invisible until the importer shipped.
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        print("ignoring arguments this program does not use: "
+              + " ".join(unknown))
     if args.maps:
         parser.error(
             "the Friends of Duty roster is fixed at seven maps "
