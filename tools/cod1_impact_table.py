@@ -17,9 +17,11 @@ Archive layering supplies the third axis: UO ships its OWN ``fx/iw_impacts.csv``
 carrying only the grenade/molotov/rocket rows (its bullets moved to the gmi
 per-class types), mounted over Main's copy. Same-named files therefore merge in
 engine load order — Main's rows first, UO's rows overriding per key — which is
-what keeps Main's ``bullet_small_*``/``bullet_large_*`` rows (the types the
-Friends of Duty runtime consumes) in the merged table while UO's richer
-grenade rows win where both speak.
+what keeps Main's ``bullet_small_*``/``bullet_large_*`` rows (the CoD1-style
+types the Friends of Duty runtime falls back to) in the merged table —
+alongside UO's per-class ``bullet_<class>_*`` rows the runtime's per-weapon
+impact selection consumes — while UO's richer grenade rows win where both
+speak.
 
 Import-safe for every exporter environment: stdlib only.
 """
@@ -36,15 +38,30 @@ IMPACTS_FORMAT = "FriendsOfDuty.Impacts"
 IMPACTS_VERSION = 1
 
 # The impact types whose efx the package ships as a full effect closure
-# (fx/efx documents + sprite textures). The runtime presents small/large
-# bullet hits through the CoD1-style types; the UO gmi per-class rows
-# (bullet_rifle_*, bullet_smg_*, ...) ship as table data only.
-BULLET_CLOSURE_IMPACT_TYPES = (
-    "bullet_small_normal",
-    "bullet_small_reflect",
-    "bullet_large_normal",
-    "bullet_large_reflect",
-)
+# (fx/efx documents + sprite textures): every ``bullet_*`` type — CoD1's
+# small/large pairs AND the UO gmi per-class rows (bullet_pistol/rifle/
+# smg/lmg/hmg/umg_*), matched by prefix so a future table addition is
+# picked up without touching this file — plus the two grenade types the
+# shipping frag grenades trigger. The heavy ordnance no shipping weapon
+# fires (molotov_*, mortar/tank/artillery/b17_explode, and
+# smoke_grenade_explode beyond what the ordnance step already ships)
+# stays table data only: its rows still ship in fx/impacts.json (the
+# runtime filters) but its effects are deliberately not packaged.
+CLOSURE_IMPACT_TYPE_PREFIXES = ("bullet_",)
+CLOSURE_IMPACT_TYPES = frozenset({"grenade_bounce", "grenade_explode"})
+
+
+def is_closure_impact_type(impact: str) -> bool:
+    """True when the package ships this impact type's effects in full.
+
+    THE closure/validation rule: tools/extract_cod1_impacts.py selects
+    closures with it and exporter/package.py validates efx presence with
+    it, so the two can never disagree.
+    """
+    return (
+        impact.startswith(CLOSURE_IMPACT_TYPE_PREFIXES)
+        or impact in CLOSURE_IMPACT_TYPES
+    )
 
 
 def parse_impact_table(text: str) -> tuple[tuple[str, str, str], ...] | None:
@@ -161,13 +178,14 @@ def surface_vocabulary(
     )
 
 
-def bullet_closure_efx_paths(
+def closure_efx_paths(
     rows: Iterable[tuple[str, str, str]],
 ) -> tuple[str, ...]:
-    """Distinct efx paths of the non-blank BULLET_CLOSURE_IMPACT_TYPES rows,
-    casefold-sorted; these are the effects the package ships in full."""
+    """Distinct efx paths of the non-blank closure-type rows (see
+    is_closure_impact_type), casefold-sorted; these are the effects the
+    package ships in full."""
     selected: dict[str, str] = {}
     for impact, _surface, efx in rows:
-        if impact in BULLET_CLOSURE_IMPACT_TYPES and efx:
+        if is_closure_impact_type(impact) and efx:
             selected.setdefault(efx.casefold(), efx)
     return tuple(selected[key] for key in sorted(selected))

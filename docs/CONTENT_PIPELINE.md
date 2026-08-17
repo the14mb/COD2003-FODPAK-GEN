@@ -169,13 +169,19 @@ current/
                                    #   muzzleflash_ppsh_{a..c}, glow_red_{a,b}, fire_ball_{a..c},
                                    #   smk_p_fractal_wht_{a..c} — plus Main's mg42a/mg42b,
                                    #   thompson/flip stages and dusty_puff)
-                                   # + the sprite closure of the bullet-impact efx (the effects
-                                   #   fx/impacts.json's bullet_small_*/bullet_large_* rows name):
+                                   # + the sprite closure of the impact efx (the effects
+                                   #   fx/impacts.json's closure-type rows name — every bullet_*
+                                   #   type, CoD1 small/large AND UO's per-class pistol/rifle/
+                                   #   smg/lmg/hmg/umg rows, plus grenade_bounce/grenade_explode):
                                    #   mist/mist2, whitesmoke, riverspray1, watersheet1,
                                    #   watering1, raindroplett, snowsheet1, stonegib1,
                                    #   dirthit_large — the authored grass-tuft/brick-chip/
                                    #   metal-spark/water-splash billboards beyond the gfx/impact
-                                   #   set above
+                                   #   set above — and the UO per-class/grenade families' DDS
+                                   #   sprites (bullet_<surface>_*, debree_gib/plg/t_*,
+                                   #   scorch_*, exp_gen_*, smk_l/p/t_*, spark_static/tail_*,
+                                   #   glow_yellow_*, rain_splash_*, water_drop/ripple,
+                                   #   surface_froth, ...)
     efx/*.efx                      # raw CoD effect definitions (reference): muzzle flashes,
                                    # shellejects + grenade1-3/_snow/_water, fireball2_gren,
                                    # smoke/emitter_panzerfaust, UO grenade/rocket/sg_* sets,
@@ -200,12 +206,22 @@ current/
                                    # mf_svt40.efx.efx); the packaged file and the flattened
                                    # lookup both fold that to the single-.efx member, while
                                    # weapons.json keeps the WEAPONFILE's verbatim spelling.
-                                   # Bullet impacts ship as full closures too: every efx a
-                                   # bullet_small_*/bullet_large_* row of fx/impacts.json names,
-                                   # plus their nested playFx dependencies (brickimpact_em/_em2,
-                                   # gravelimpact_em/_em2, impact_em, rocksplashes, leafs) —
-                                   # the large_* family, metalhit_large, snowhit_large and
-                                   # waterhit_small/large joined the small-arms set this way.
+                                   # Impacts ship as full closures too: every efx a
+                                   # closure-type row of fx/impacts.json names
+                                   # (cod1_impact_table.is_closure_impact_type: ALL bullet_*
+                                   # types — CoD1's small/large pairs and UO's gmi per-class
+                                   # pistol/rifle/smg/lmg/hmg/umg rows — plus grenade_bounce
+                                   # and grenade_explode), with their nested playFx
+                                   # dependencies (brickimpact_em/_em2, gravelimpact_em/_em2,
+                                   # impact_em, rocksplashes, leafs) — the large_* family,
+                                   # metalhit_large, snowhit_large, waterhit_small/large, the
+                                   # UO impact_p_*/impact_smg_*/impact_lmg_*/impact_hmg_*/
+                                   # impact_{high,low}lod_umg families, and the per-surface
+                                   # grenade_<surface> eruptions joined the small-arms set
+                                   # this way. The heavy ordnance no shipping weapon fires
+                                   # (molotov_*, mortar/tank/artillery/b17_explode,
+                                   # smoke_grenade_explode beyond the ordnance step's set)
+                                   # stays table data only, by decision.
     impacts.json                   # {"format":"FriendsOfDuty.Impacts","version":1,
                                    #  "rows":[{"impact":"bullet_small_normal","surface":"dirt",
                                    #           "efx":"fx/impacts/small_gravel2.efx"}, ...]}
@@ -221,9 +237,10 @@ current/
                                    # types). ALL rows ship — grenade/rocket/gmi types too, the
                                    # runtime filters — impact and surface lowercased, efx paths
                                    # forward-slashed, deliberately blank efx cells kept as ""
-                                   # (they mean "play no effect"). The efx of the four
-                                   # bullet_small_*/bullet_large_* types resolve by BASENAME in
-                                   # fx/efx/ (see above); the other rows are data only.
+                                   # (they mean "play no effect"). The efx of the closure
+                                   # types (every bullet_* type + grenade_bounce/
+                                   # grenade_explode) resolve by BASENAME in fx/efx/ (see
+                                   # above); the other rows are data only.
                                    # Additive + warn-only (§1.3.1): no gameContentVersion bump.
     shaders.json                   # {"format":"FriendsOfDuty.FxShaders","version":1,
                                    #  "shaders":[{"shader":"gfx/effects/muzflash2_sn",
@@ -318,8 +335,10 @@ Flesh, Foliage and Water place no mark, matching their empty efx.
 
 **Which efx plays on which surface** is no longer transcribed at all: retail's own
 impact table ships parsed as `fx/impacts.json` (§1.2), each map's `materials.json`
-carries the shader-declared `surface` token, and the four `bullet_small_*` /
-`bullet_large_*` types' effects ship as complete closures under `fx/efx/` +
+carries the shader-declared `surface` token, and the closure types' effects — every
+`bullet_*` type (the CoD1 `bullet_small_*`/`bullet_large_*` pairs and UO's per-class
+`bullet_pistol/rifle/smg/lmg/hmg/umg_*` rows the per-weapon-class selection uses)
+plus `grenade_bounce`/`grenade_explode` — ship as complete closures under `fx/efx/` +
 `fx/textures/`, so the runtime can look up surface → efx → sprites entirely from
 package data. The nine-bucket profiles above remain the fallback for packages that
 predate the manifest and for materials whose shader declared no surface token.

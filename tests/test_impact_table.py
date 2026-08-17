@@ -209,6 +209,7 @@ class MergeImpactTablesTests(unittest.TestCase):
             ("bullet_small_reflect", "metal", ""),
             ("bullet_rifle_normal", "grass", "fx/weapon/impacts/rifle.efx"),
             ("grenade_bounce", "vehicle", "fx/weapon/impacts/bounce.efx"),
+            ("molotov_explode_normal", "grass", "fx/impacts/molotov.efx"),
         )
         # "default" is the engine's could-not-classify bucket, not a
         # surfaceparm token.
@@ -216,12 +217,59 @@ class MergeImpactTablesTests(unittest.TestCase):
             impact_table.surface_vocabulary(rows),
             frozenset({"grass", "metal", "vehicle"}),
         )
-        # Only the four bullet_small/large types select closures; blanks and
-        # the gmi per-class row do not.
+        # Every bullet_* row (small/large AND the gmi per-class ones) plus
+        # the grenade types select closures; blanks and the out-of-scope
+        # ordnance (molotov here) do not.
         self.assertEqual(
-            impact_table.bullet_closure_efx_paths(rows),
-            ("fx/impacts/default_hit.efx", "fx/impacts/small_grass.efx"),
+            impact_table.closure_efx_paths(rows),
+            (
+                "fx/impacts/default_hit.efx",
+                "fx/impacts/small_grass.efx",
+                "fx/weapon/impacts/bounce.efx",
+                "fx/weapon/impacts/rifle.efx",
+            ),
         )
+
+    def test_closure_type_rule_is_prefix_wide_and_excludes_ordnance(
+        self,
+    ) -> None:
+        # ALL bullet_* types are closure types — the CoD1 pairs, every UO
+        # gmi per-class type, and any future bullet_* table addition,
+        # without this file naming them one by one.
+        for impact in (
+            "bullet_small_normal",
+            "bullet_small_reflect",
+            "bullet_large_normal",
+            "bullet_large_reflect",
+            "bullet_pistol_normal",
+            "bullet_rifle_normal",
+            "bullet_smg_normal",
+            "bullet_lmg_normal",
+            "bullet_hmg_normal",
+            "bullet_umg_normal",
+            "bullet_umg_reflect",
+            "bullet_shotgun_normal",  # hypothetical future addition
+            "grenade_bounce",
+            "grenade_explode",
+        ):
+            self.assertTrue(
+                impact_table.is_closure_impact_type(impact), impact
+            )
+        # The heavy ordnance no shipping weapon fires stays table data only.
+        for impact in (
+            "molotov_explode_normal",
+            "molotov_explode_reflect",
+            "mortar_explode",
+            "tank_explode",
+            "artillery_explode",
+            "b17_explode",
+            "smoke_grenade_explode",
+            "rocket_explode",
+            "grenade",  # not one of the two named grenade types
+        ):
+            self.assertFalse(
+                impact_table.is_closure_impact_type(impact), impact
+            )
 
 
 SHADER_SCRIPT = """textures/normandy/grass_top
@@ -300,13 +348,16 @@ class ImpactsPackageValidationTests(unittest.TestCase):
                 warnings,
             )
 
-    def test_bullet_row_efx_must_be_packaged_but_gmi_rows_need_not(
+    def test_closure_row_efx_must_be_packaged_but_ordnance_rows_need_not(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             content = Path(temporary)
             (content / "fx" / "efx").mkdir(parents=True)
             (content / "fx" / "efx" / "small_grass.efx").write_bytes(b"efx")
+            (
+                content / "fx" / "efx" / "impact_smg_grass.efx"
+            ).write_bytes(b"efx")
             self._write_manifest(content, [
                 {
                     "impact": "bullet_small_normal",
@@ -324,19 +375,34 @@ class ImpactsPackageValidationTests(unittest.TestCase):
                     "surface": "metal",
                     "efx": "",
                 },
-                # gmi per-class rows are data only; their efx are
-                # deliberately not packaged.
+                # UO gmi per-class rows are closure types too (packaged
+                # here, so silent)...
                 {
                     "impact": "bullet_rifle_normal",
                     "surface": "grass",
                     "efx": "fx/weapon/impacts/impact_smg_grass.efx",
+                },
+                # ...and so are the grenade types (absent, so warned).
+                {
+                    "impact": "grenade_explode",
+                    "surface": "dirt",
+                    "efx": "fx/weapon/explosions/grenade_dirt.efx",
+                },
+                # Heavy ordnance no shipping weapon fires is data only; its
+                # efx is deliberately not packaged and must not warn.
+                {
+                    "impact": "molotov_explode_normal",
+                    "surface": "grass",
+                    "efx": "fx/weapon/explosions/molotov_grass.efx",
                 },
             ])
             warnings: list[str] = []
             fod_package.validate_impacts_manifest(content, warnings)
             self.assertEqual(len(warnings), 1, warnings)
             self.assertIn("metalhit_large", warnings[0])
+            self.assertIn("grenade_dirt", warnings[0])
             self.assertNotIn("impact_smg_grass", warnings[0])
+            self.assertNotIn("molotov_grass", warnings[0])
 
     def test_materials_surface_tokens_must_be_in_vocabulary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

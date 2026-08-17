@@ -65,9 +65,9 @@ from cod1_multiplayer_closure import (  # noqa: E402
     is_managed_source_path,
 )
 from cod1_impact_table import (  # noqa: E402
-    BULLET_CLOSURE_IMPACT_TYPES,
     IMPACTS_FORMAT,
     IMPACTS_VERSION,
+    is_closure_impact_type,
 )
 from cod1_script_exploder import (  # noqa: E402
     ScriptExploderClosureError,
@@ -5099,14 +5099,18 @@ def validate_impacts_manifest(
     content: Path,
     warnings: list[str],
 ) -> None:
-    """Warn when fx/impacts.json is absent/malformed, when a bullet-closure
+    """Warn when fx/impacts.json is absent/malformed, when a closure-type
     row names an efx with no packaged fx/efx file, or when a materials.json
     ``surface`` token is outside the table's surface vocabulary.
 
-    The bullet check covers exactly the BULLET_CLOSURE_IMPACT_TYPES rows the
-    impacts step ships closures for; the UO gmi per-class rows
-    (bullet_rifle_* and friends) are table data the runtime does not present,
-    so their efx are deliberately not packaged and must not warn.
+    The efx-presence check covers exactly the rows the impacts step ships
+    closures for, derived from the SAME rule
+    (cod1_impact_table.is_closure_impact_type: every bullet_* type — CoD1
+    small/large and UO's gmi per-class rows — plus grenade_bounce/
+    grenade_explode) so validator and closure can never disagree. The heavy
+    ordnance no shipping weapon fires (molotov_*, mortar/tank/artillery/
+    b17_explode, smoke_grenade_explode) is table data the runtime filters,
+    so its efx are deliberately not packaged and must not warn.
     """
     manifest = load_json(content / "fx" / "impacts.json")
     if manifest is None:
@@ -5146,7 +5150,7 @@ def validate_impacts_manifest(
         if row["surface"] != "default":
             vocabulary.add(row["surface"])
         efx = row["efx"]
-        if row["impact"] in BULLET_CLOSURE_IMPACT_TYPES and efx:
+        if is_closure_impact_type(row["impact"]) and efx:
             flattened = flattened_efx_name(efx)
             if flattened.casefold() not in packaged_efx_names:
                 absent_efx.setdefault(flattened.casefold(), efx)
@@ -5158,7 +5162,7 @@ def validate_impacts_manifest(
             ", ..." if len(references) > 6 else ""
         )
         warnings.append(
-            f"fx/efx missing {len(references)} bullet impact effect(s) "
+            f"fx/efx missing {len(references)} impact effect(s) "
             f"named by fx/impacts.json: {preview} (run the impacts step)"
         )
     unknown_surfaces: dict[str, str] = {}

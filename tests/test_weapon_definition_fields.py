@@ -154,6 +154,40 @@ class WeaponDefinitionFieldTests(unittest.TestCase):
             )
             self.assertEqual(weapon["world_muzzle_effect"], "")
 
+    def test_weapon_class_is_emitted_for_every_weapon(self) -> None:
+        # The per-class impact tiers select on weapon_class, so the SMGs
+        # must say "smg" (they were deliberately folded into "rifle" while
+        # the class only picked tracer splits) and rifles must carry the
+        # explicit "rifle" rather than a dropped field.
+        with tempfile.TemporaryDirectory() as temporary:
+            source_root = Path(temporary)
+            weapons = source_root / "weapons" / "mp"
+            weapons.mkdir(parents=True)
+            (source_root / "xanim").mkdir()
+            (source_root / "xanim" / "shared_melee").write_bytes(b"anim")
+            for weapon_file in roster_weapon_files():
+                (weapons / weapon_file).write_text(WEAPON_TEMPLATE)
+            (weapons / "mp40_mp").write_text(
+                WEAPON_TEMPLATE.replace(
+                    "\\weaponClass\\rifle", "\\weaponClass\\smg"
+                )
+            )
+
+            namespace = load_definition_namespace(source_root)
+            by_name = {
+                entry["name"]: entry for entry in namespace["WEAPONS"]
+            }
+            self.assertEqual(
+                namespace["weapon_definition"](
+                    by_name["mp40"])["weapon_class"],
+                "smg",
+            )
+            self.assertEqual(
+                namespace["weapon_definition"](
+                    by_name["kar98k"])["weapon_class"],
+                "rifle",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

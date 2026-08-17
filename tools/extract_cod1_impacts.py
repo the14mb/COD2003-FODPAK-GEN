@@ -26,12 +26,19 @@ shipped Assets/Resources extraction on 2026-07-25:
                                    Main's). All rows ship; blank efx cells
                                    stay "" (deliberate no-effect).
   fx/efx/ + fx/textures/        <- the full effect closure of every efx the
-                                   merged bullet_small_*/bullet_large_* rows
-                                   name: nested .efx documents flattened to
-                                   basenames, every shader-resolved sprite as
-                                   <stem>.png (cod1_script_exploder
-                                   build_effect_closure, weapon-presentation
-                                   collision guard).
+                                   merged closure-type rows name
+                                   (cod1_impact_table.is_closure_impact_type:
+                                   ALL bullet_* types — CoD1's small/large
+                                   pairs and UO's per-class pistol/rifle/smg/
+                                   lmg/hmg/umg rows — plus grenade_bounce and
+                                   grenade_explode): nested .efx documents
+                                   flattened to basenames, every
+                                   shader-resolved sprite as <stem>.png
+                                   (cod1_script_exploder build_effect_closure,
+                                   weapon-presentation collision guard).
+                                   grenade_bounce_generic.efx is also shipped
+                                   by the ordnance step; identical bytes, the
+                                   flatten guard ships it once.
   fx/efx/<name>.efx             <- Main/pak5.pk3 fx/impacts/<name>.efx (verbatim)
                                    The small-arms impact effects, kept as
                                    reference because their `Decal { ... shaders [
@@ -75,7 +82,7 @@ from cod1_archive_policy import (
     official_archives,
 )
 from cod1_impact_table import (
-    bullet_closure_efx_paths,
+    closure_efx_paths,
     discover_impact_tables,
     impacts_manifest_payload,
     merge_impact_rows,
@@ -533,11 +540,14 @@ def main() -> None:
     # Retail's per-surface impact table, merged exactly as the engine does
     # (fx/*.csv, later filenames overriding earlier rows per (impact,
     # surface), archive layering merging same-named files), shipped verbatim
-    # as fx/impacts.json — ALL rows, the runtime filters. The bullet_small/
-    # bullet_large rows' effects then ship as full closures: the .efx
-    # documents flattened into fx/efx/ and every sprite their shaders
-    # resolve to into fx/textures/, so the authored grass-tuft/brick-chip/
-    # metal-spark effects play from package data alone.
+    # as fx/impacts.json — ALL rows, the runtime filters. The closure-type
+    # rows' effects then ship as full closures (is_closure_impact_type:
+    # every bullet_* type — CoD1 small/large AND UO's per-class pistol/
+    # rifle/smg/lmg/hmg/umg rows — plus grenade_bounce/grenade_explode):
+    # the .efx documents flattened into fx/efx/ and every sprite their
+    # shaders resolve to into fx/textures/, so the authored grass-tuft/
+    # brick-chip/metal-spark/grenade-eruption effects play from package
+    # data alone.
     impact_tables = discover_impact_tables(index.archives)
     impact_rows = merge_impact_rows(
         rows for _name, _archive, rows in impact_tables
@@ -611,7 +621,7 @@ def main() -> None:
 
     closure_efx: dict[str, str] = {}
     closure_images: dict[str, str] = {}
-    for source_efx in bullet_closure_efx_paths(impact_rows):
+    for source_efx in closure_efx_paths(impact_rows):
         try:
             effect = build_effect_closure(
                 exploder_index,
@@ -619,7 +629,7 @@ def main() -> None:
                 source_efx,
             )
         except ScriptExploderClosureError as error:
-            message = f"impacts: bullet impact closure unresolved: {error}"
+            message = f"impacts: impact closure unresolved: {error}"
             print(f"WARNING {message}")
             notes.append(message)
             continue

@@ -104,7 +104,10 @@ UO_ROSTER = (
 # projExplosionType smoke becomes "smoke".
 WEAPON_CLASSES = {
     "rifle": "rifle",
-    "smg": "rifle",
+    # Folding smg into rifle was harmless while the class only selected
+    # tracer splits (keyed on "mg"); the per-class impact tiers now need
+    # the SMGs to say what they are.
+    "smg": "smg",
     "spread": "rifle",
     "mg": "mg",
     # United Offensive spells its deployable machine guns "lmg". Leaving it
@@ -142,7 +145,10 @@ def ordnance_fields(values: dict, weapon_class: str) -> dict:
     explosion_type = values.get("projExplosionType", "").strip()
     throwable = weapon_class in ("grenade", "smoke")
     fields = {
-        "weapon_class": weapon_class if weapon_class != "rifle" else "",
+        # Emitted for every weapon: the runtime's default is "rifle" so the
+        # explicit value is equivalent for rifles and load-bearing for the
+        # per-class impact tiers everywhere else.
+        "weapon_class": weapon_class,
         "fuse_time": number(values, "fuseTime"),
         "cook": values.get("cookOffHold", "0") == "1",
         "explosion_radius": number(values, "explosionRadius"),
